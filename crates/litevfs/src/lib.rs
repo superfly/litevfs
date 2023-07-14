@@ -1,5 +1,3 @@
-mod connection;
+mod database;
 mod locks;
 mod vfs;
-
-pub use vfs::LiteVfs;
