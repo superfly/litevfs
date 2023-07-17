@@ -3,9 +3,13 @@ name = "litevfs"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+env_logger = "0.10"
+log = "0.4"
 ltx = { git = "ssh://git@github.com/superfly/ltx-rs.git", branch = "main" }
 rand = "0.8"
-sqlite-vfs = "0.2"
+sqlite-vfs = { path = "../sqlite-vfs", features = ["syscall", "loadext"] }

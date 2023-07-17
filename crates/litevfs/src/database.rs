@@ -56,7 +56,7 @@ impl DatabaseManager {
 }
 
 pub(crate) struct Database {
-    _path: PathBuf,
+    path: PathBuf,
     page_size: Option<ltx::PageSize>,
 
     pages: BTreeMap<ltx::PageNum, Page>,
@@ -66,11 +66,15 @@ pub(crate) struct Database {
 impl Database {
     fn new(path: PathBuf) -> Database {
         Database {
-            _path: path,
+            path,
             page_size: None,
             pages: BTreeMap::new(),
             dirty_pages: BTreeMap::new(),
         }
+    }
+
+    pub(crate) fn name(&self) -> String {
+        self.path.to_string_lossy().into_owned()
     }
 
     fn page_size(&self) -> io::Result<ltx::PageSize> {
@@ -95,14 +99,14 @@ impl Database {
     fn ensure_aligned(&self, buf: &[u8], offset: u64) -> io::Result<()> {
         let page_size = self.page_size()?.into_inner() as usize;
 
-        // SQLite always reads exactly one page
+        // SQLite always writes exactly one page
         if offset as usize % page_size != 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "offset not page aligned",
             ));
         }
-        if buf.len() % page_size != 0 {
+        if buf.len() > page_size {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "unexpected buffer size",
@@ -112,11 +116,26 @@ impl Database {
         Ok(())
     }
 
-    fn page_num_for(&self, offset: u64) -> io::Result<ltx::PageNum> {
+    fn ensure_single_page(&self, buf: &[u8], offset: u64) -> io::Result<()> {
+        let page_size = self.page_size()?.into_inner() as usize;
+        let offset = offset as usize % page_size;
+
+        if offset + buf.len() > page_size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "read requests to multiple pages",
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn page_num_for(&self, offset: u64) -> io::Result<(ltx::PageNum, usize)> {
         let page_size = self.page_size()?;
-        Ok(ltx::PageNum::new(
-            (offset / page_size.into_inner() as u64 + 1) as u32,
-        )?)
+        Ok((
+            ltx::PageNum::new((offset / page_size.into_inner() as u64 + 1) as u32)?,
+            offset as usize % page_size.into_inner() as usize,
+        ))
     }
 
     fn get_page(&self, page_num: ltx::PageNum) -> io::Result<&Page> {
@@ -169,12 +188,16 @@ impl Database {
     }
 
     pub(crate) fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
-        self.ensure_aligned(buf, offset)?;
-        let page_num = self.page_num_for(offset)?;
+        if self.page_size.is_none() {
+            return Err(io::ErrorKind::UnexpectedEof.into());
+        }
+
+        self.ensure_single_page(buf, offset)?;
+        let (page_num, offset) = self.page_num_for(offset)?;
 
         let page = self.get_page(page_num)?;
 
-        buf.copy_from_slice(&page.buf);
+        buf.copy_from_slice(&page.buf[offset..offset + buf.len()]);
 
         Ok(())
     }
@@ -185,7 +208,7 @@ impl Database {
         }
 
         self.ensure_aligned(buf, offset)?;
-        let page_num = self.page_num_for(offset)?;
+        let (page_num, _) = self.page_num_for(offset)?;
 
         self.put_page(page_num, buf)?;
 

@@ -22,6 +22,8 @@ impl Vfs for LiteVfs {
     type Handle = LiteConnection;
 
     fn open(&self, db: &str, opts: OpenOptions) -> io::Result<Self::Handle> {
+        log::trace!("[vfs] open: db = {}, opts = {:?}", db, opts);
+
         if opts.kind != OpenKind::MainDb {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -38,12 +40,16 @@ impl Vfs for LiteVfs {
         Ok(LiteConnection::new(database, self.lock.conn_lock()))
     }
 
-    fn delete(&self, _db: &str) -> io::Result<()> {
+    fn delete(&self, db: &str) -> io::Result<()> {
+        log::trace!("[vfs] delete: db = {}", db);
+
         // TODO: We don't delete databases for now
         Ok(())
     }
 
     fn exists(&self, db: &str) -> io::Result<bool> {
+        log::trace!("[vfs] exists: db = {}", db);
+
         self.database_manager
             .lock()
             .unwrap()
@@ -59,6 +65,8 @@ impl Vfs for LiteVfs {
     }
 
     fn sleep(&self, duration: time::Duration) -> time::Duration {
+        log::trace!("[vfs] sleep: duration: {:?}", duration);
+
         // TODO: This will block JS runtime. Should be call back to JS here???
         let now = time::Instant::now();
         thread::sleep(duration);
@@ -86,13 +94,20 @@ impl LiteVfs {
 }
 
 pub struct LiteConnection {
+    dbname: String,
     database: Arc<RwLock<Database>>,
     lock: ConnLock,
 }
 
 impl LiteConnection {
     pub(crate) fn new(database: Arc<RwLock<Database>>, lock: ConnLock) -> Self {
-        LiteConnection { database, lock }
+        let dbname = database.read().unwrap().name();
+
+        LiteConnection {
+            dbname,
+            database,
+            lock,
+        }
     }
 }
 
@@ -104,11 +119,33 @@ impl DatabaseHandle for LiteConnection {
     }
 
     fn read_exact_at(&mut self, buf: &mut [u8], offset: u64) -> io::Result<()> {
-        self.database.read().unwrap().read_at(buf, offset)
+        let r = self.database.read().unwrap().read_at(buf, offset);
+        if let Err(ref e) = r {
+            log::warn!(
+                "[connection] read_exact_at: db = {}, len = {}, offset = {}: {:?}",
+                self.dbname,
+                buf.len(),
+                offset,
+                e
+            );
+        };
+
+        r
     }
 
     fn write_all_at(&mut self, buf: &[u8], offset: u64) -> io::Result<()> {
-        self.database.write().unwrap().write_at(buf, offset)
+        let r = self.database.write().unwrap().write_at(buf, offset);
+        if let Err(ref e) = r {
+            log::warn!(
+                "[connection] write_exact_at: db = {}, len = {}, offset = {}: {:?}",
+                self.dbname,
+                buf.len(),
+                offset,
+                e
+            );
+        };
+
+        r
     }
 
     fn sync(&mut self, _data_only: bool) -> io::Result<()> {
