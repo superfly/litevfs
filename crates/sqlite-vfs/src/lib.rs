@@ -62,6 +62,11 @@ pub trait DatabaseHandle: Sync {
         Ok(())
     }
 
+    /// Called under Exclusive lock after a successful commit.
+    fn committed(&self) -> Result<(), std::io::Error> {
+        Ok(())
+    }
+
     /// Check if the underlying data of the handle got moved or deleted. When moved, the handle can
     /// still be read from, but not written to anymore.
     fn moved(&self) -> Result<bool, std::io::Error> {
@@ -1425,7 +1430,10 @@ mod io {
 
             // Sent to the VFS after a transaction has been committed immediately but before the
             // database is unlocked. Silently ignored.
-            ffi::SQLITE_FCNTL_COMMIT_PHASETWO => ffi::SQLITE_OK,
+            ffi::SQLITE_FCNTL_COMMIT_PHASETWO => match state.file.committed() {
+                Ok(()) => ffi::SQLITE_OK,
+                Err(err) => state.set_last_error(ffi::SQLITE_ERROR, err),
+            },
 
             // Used for debugging. Swap the file handle with the one pointed to by the pArg
             // argument. This capability is used during testing and only needs to be supported when
