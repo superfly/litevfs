@@ -168,6 +168,15 @@ impl DatabaseHandle for LiteConnection {
         Ok(self.lock.state())
     }
 
+    fn committed(&self) -> io::Result<()> {
+        let r = self.database.write().unwrap().committed();
+        if let Err(ref e) = r {
+            log::warn!("[connection] committed: db = {}: {:?}", self.dbname, e);
+        };
+
+        r
+    }
+
     fn wal_index(&self, _readonly: bool) -> io::Result<Self::WalIndex> {
         Ok(sqlite_vfs::WalDisabled::default())
     }

@@ -2,9 +2,10 @@ use ltx::PageChecksum;
 use sqlite_vfs::OpenAccess;
 use std::{
     collections::{BTreeMap, HashMap},
-    io,
+    fs, io,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
+    time,
 };
 
 pub(crate) struct DatabaseManager {
@@ -60,7 +61,10 @@ pub(crate) struct Database {
     page_size: Option<ltx::PageSize>,
 
     pages: BTreeMap<ltx::PageNum, Page>,
-    dirty_pages: BTreeMap<ltx::PageNum, DirtyPage>,
+    dirty_pages: BTreeMap<ltx::PageNum, Option<ltx::Checksum>>,
+
+    next_txid: ltx::TXID,
+    pre_apply_checksum: Option<ltx::Checksum>,
 }
 
 impl Database {
@@ -70,6 +74,8 @@ impl Database {
             page_size: None,
             pages: BTreeMap::new(),
             dirty_pages: BTreeMap::new(),
+            next_txid: ltx::TXID::ONE,
+            pre_apply_checksum: None,
         }
     }
 
@@ -145,35 +151,37 @@ impl Database {
             .ok_or(io::ErrorKind::UnexpectedEof.into())
     }
 
-    fn get_page_mut(&mut self, page_num: ltx::PageNum) -> io::Result<Page> {
+    fn get_page_mut(&mut self, page_num: ltx::PageNum) -> io::Result<Option<Page>> {
         // TODO: fetch from local cache or LFSC
-        let page_size = self.page_size()?.into_inner() as usize;
-
-        Ok(self.pages.remove(&page_num).unwrap_or_else(|| {
-            let buf = vec![0; page_size];
-            let checksum = buf.page_checksum(page_num);
-
-            Page { buf, checksum }
-        }))
+        Ok(self.pages.remove(&page_num))
     }
 
     fn put_page(&mut self, page_num: ltx::PageNum, buf: &[u8]) -> io::Result<()> {
-        let mut page = self.get_page_mut(page_num)?;
+        let page = self.get_page_mut(page_num)?;
+        let original_checksum = self
+            .dirty_pages
+            .get(&page_num)
+            .copied()
+            .unwrap_or_else(|| page.as_ref().map(|p| p.checksum));
 
-        let original_checksum = if let Some(dirty_page) = self.dirty_pages.get(&page_num) {
-            dirty_page.checksum
-        } else {
-            Some(page.checksum)
+        let mut page_buf = match page {
+            Some(p) => p.buf,
+            // TODO: use MaybeUninit?
+            _ => vec![0; self.page_size()?.into_inner() as usize],
         };
 
-        page.buf.copy_from_slice(buf);
-        page.checksum = page.buf.page_checksum(page_num);
+        page_buf.copy_from_slice(buf);
+        let checksum = page_buf.page_checksum(page_num);
 
-        self.pages.insert(page_num, page);
-        self.dirty_pages.insert(
+        match original_checksum {
+            Some(os) if os == checksum => self.dirty_pages.remove(&page_num),
+            _ => self.dirty_pages.insert(page_num, original_checksum),
+        };
+        self.pages.insert(
             page_num,
-            DirtyPage {
-                checksum: original_checksum,
+            Page {
+                buf: page_buf,
+                checksum,
             },
         );
 
@@ -224,10 +232,61 @@ impl Database {
                 "size not page aligned",
             ));
         }
-        if let Some(split_off_point) = ltx::PageNum::new((size / page_size) as u32)? + 1 {
-            self.pages.split_off(&split_off_point);
-            self.dirty_pages.split_off(&split_off_point);
+
+        let split_off_point = ltx::PageNum::new((size / page_size) as u32)? + 1;
+        self.pages.split_off(&split_off_point);
+        self.dirty_pages.split_off(&split_off_point);
+
+        Ok(())
+    }
+
+    pub(crate) fn committed(&mut self) -> io::Result<()> {
+        let header_page = self.get_page(ltx::PageNum::ONE)?;
+        let commit = ltx::PageNum::new(u32::from_be_bytes(
+            header_page.buf[28..32].try_into().unwrap(),
+        ))?;
+
+        if self.dirty_pages.len() == 0 {
+            return Ok(());
         }
+
+        let file = fs::File::create(self.path.join(format!("{0}-{0}.ltx", self.next_txid)))?;
+        let mut enc = ltx::Encoder::new(
+            &file,
+            &ltx::Header {
+                flags: ltx::HeaderFlags::empty(),
+                page_size: self.page_size()?,
+                commit,
+                min_txid: self.next_txid,
+                max_txid: self.next_txid,
+                timestamp: time::SystemTime::now(),
+                pre_apply_checksum: self.pre_apply_checksum,
+            },
+        )?;
+
+        let mut checksum = self
+            .pre_apply_checksum
+            .map(|cs| cs.into_inner())
+            .unwrap_or(0);
+        for (&page_num, &prev_checksum) in self.dirty_pages.iter().filter(|&(&n, _)| n <= commit) {
+            if let Some(pcs) = prev_checksum {
+                checksum ^= pcs.into_inner();
+                log::trace!("prev checksum!!!! {:?}", pcs);
+            }
+
+            let page = self.get_page(page_num)?;
+            checksum ^= page.checksum.into_inner();
+            enc.encode_page(page_num, &page.buf)?;
+        }
+
+        let checksum = ltx::Checksum::new(checksum);
+        enc.finish(checksum)?;
+        file.sync_all()?;
+
+        self.dirty_pages.clear();
+
+        self.next_txid = self.next_txid + 1;
+        self.pre_apply_checksum = Some(checksum);
 
         Ok(())
     }
@@ -236,8 +295,4 @@ impl Database {
 struct Page {
     buf: Vec<u8>,
     checksum: ltx::Checksum,
-}
-
-struct DirtyPage {
-    checksum: Option<ltx::Checksum>,
 }
