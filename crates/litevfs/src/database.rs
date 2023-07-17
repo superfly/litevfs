@@ -1,11 +1,11 @@
+use ltx::PageChecksum;
+use sqlite_vfs::OpenAccess;
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, HashMap},
     io,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
-
-use sqlite_vfs::OpenAccess;
 
 pub(crate) struct DatabaseManager {
     base_path: PathBuf,
@@ -59,9 +59,8 @@ pub(crate) struct Database {
     _path: PathBuf,
     page_size: Option<ltx::PageSize>,
 
-    // TODO: temporary, for now DB is in-memory only
-    pages: Vec<Vec<u8>>,
-    dirty_pages: BTreeSet<usize>,
+    pages: BTreeMap<ltx::PageNum, Page>,
+    dirty_pages: BTreeMap<ltx::PageNum, DirtyPage>,
 }
 
 impl Database {
@@ -69,20 +68,14 @@ impl Database {
         Database {
             _path: path,
             page_size: None,
-            pages: Vec::new(),
-            dirty_pages: BTreeSet::new(),
+            pages: BTreeMap::new(),
+            dirty_pages: BTreeMap::new(),
         }
     }
 
-    fn page_size(&self) -> io::Result<usize> {
-        if let Some(ps) = self.page_size {
-            Ok(ps.into_inner() as usize)
-        } else {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "page size unknown",
-            ));
-        }
+    fn page_size(&self) -> io::Result<ltx::PageSize> {
+        self.page_size
+            .ok_or(io::Error::new(io::ErrorKind::Other, "page size unknown"))
     }
 
     fn set_page_size(&mut self, page0: &[u8]) -> io::Result<()> {
@@ -100,7 +93,7 @@ impl Database {
     }
 
     fn ensure_aligned(&self, buf: &[u8], offset: u64) -> io::Result<()> {
-        let page_size = self.page_size()?;
+        let page_size = self.page_size()?.into_inner() as usize;
 
         // SQLite always reads exactly one page
         if offset as usize % page_size != 0 {
@@ -119,6 +112,55 @@ impl Database {
         Ok(())
     }
 
+    fn page_num_for(&self, offset: u64) -> io::Result<ltx::PageNum> {
+        let page_size = self.page_size()?;
+        Ok(ltx::PageNum::new(
+            (offset / page_size.into_inner() as u64 + 1) as u32,
+        )?)
+    }
+
+    fn get_page(&self, page_num: ltx::PageNum) -> io::Result<&Page> {
+        // TODO: fetch from local cache or LFSC
+        self.pages
+            .get(&page_num)
+            .ok_or(io::ErrorKind::UnexpectedEof.into())
+    }
+
+    fn get_page_mut(&mut self, page_num: ltx::PageNum) -> io::Result<Page> {
+        // TODO: fetch from local cache or LFSC
+        let page_size = self.page_size()?.into_inner() as usize;
+
+        Ok(self.pages.remove(&page_num).unwrap_or_else(|| {
+            let buf = vec![0; page_size];
+            let checksum = buf.page_checksum(page_num);
+
+            Page { buf, checksum }
+        }))
+    }
+
+    fn put_page(&mut self, page_num: ltx::PageNum, buf: &[u8]) -> io::Result<()> {
+        let mut page = self.get_page_mut(page_num)?;
+
+        let original_checksum = if let Some(dirty_page) = self.dirty_pages.get(&page_num) {
+            dirty_page.checksum
+        } else {
+            Some(page.checksum)
+        };
+
+        page.buf.copy_from_slice(buf);
+        page.checksum = page.buf.page_checksum(page_num);
+
+        self.pages.insert(page_num, page);
+        self.dirty_pages.insert(
+            page_num,
+            DirtyPage {
+                checksum: original_checksum,
+            },
+        );
+
+        Ok(())
+    }
+
     pub(crate) fn size(&self) -> io::Result<u64> {
         match self.page_size {
             None => Ok(0),
@@ -128,17 +170,11 @@ impl Database {
 
     pub(crate) fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
         self.ensure_aligned(buf, offset)?;
-        let page_size = self.page_size()?;
+        let page_num = self.page_num_for(offset)?;
 
-        let page_index = offset as usize / page_size;
-        if page_index >= self.pages.len() {
-            return Err(io::ErrorKind::UnexpectedEof.into());
-        }
-        if self.pages[page_index].len() != page_size {
-            buf.fill(0);
-        } else {
-            buf.copy_from_slice(&self.pages[page_index]);
-        }
+        let page = self.get_page(page_num)?;
+
+        buf.copy_from_slice(&page.buf);
 
         Ok(())
     }
@@ -149,25 +185,15 @@ impl Database {
         }
 
         self.ensure_aligned(buf, offset)?;
-        let page_size = self.page_size()?;
+        let page_num = self.page_num_for(offset)?;
 
-        let page_index = offset as usize / page_size;
-        if page_index >= self.pages.len() {
-            self.pages.resize_with(page_index + 1, Default::default);
-        }
-        if self.pages[page_index].len() != page_size {
-            self.pages[page_index].resize(page_size, 0);
-        }
-
-        self.pages[page_index].copy_from_slice(buf);
-
-        self.dirty_pages.insert(page_index);
+        self.put_page(page_num, buf)?;
 
         Ok(())
     }
 
     pub(crate) fn truncate(&mut self, size: u64) -> io::Result<()> {
-        let page_size = self.page_size()?;
+        let page_size = self.page_size()?.into_inner() as usize;
         let size = size as usize;
         if size % page_size != 0 {
             return Err(io::Error::new(
@@ -175,14 +201,20 @@ impl Database {
                 "size not page aligned",
             ));
         }
-
-        let want_len = size / page_size;
-        if self.pages.len() > want_len {
-            self.pages.truncate(want_len);
-        } else if self.pages.len() < want_len {
-            self.pages.resize_with(want_len, Default::default);
+        if let Some(split_off_point) = ltx::PageNum::new((size / page_size) as u32)? + 1 {
+            self.pages.split_off(&split_off_point);
+            self.dirty_pages.split_off(&split_off_point);
         }
 
         Ok(())
     }
+}
+
+struct Page {
+    buf: Vec<u8>,
+    checksum: ltx::Checksum,
+}
+
+struct DirtyPage {
+    checksum: Option<ltx::Checksum>,
 }
