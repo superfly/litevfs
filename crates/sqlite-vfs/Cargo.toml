@@ -1,0 +1,23 @@
+[package]
+name = "sqlite-vfs"
+version = "0.2.0"
+authors = ["Markus Ast <m@rkusa.st>"]
+license = "MIT OR Apache-2.0"
+edition = "2021"
+description = "Build SQLite virtual file systems (VFS) by implementing a simple Rust trait."
+repository = "https://github.com/rkusa/sqlite-vfs"
+documentation = "https://docs.rs/sqlite-vfs"
+keywords = ["sqlite", "vfs"]
+
+[dependencies]
+log = "0.4"
+time = "0.3"
+
+[features]
+default = []
+
+# Enable an delegate to parent VFS: `xSetSystemCall`, `xGetSystemCall` and `xNextSystemCall`
+syscall = []
+
+# Enable an delegate to parent VFS: `xDlOpen`, `xDlError`, `xDlSym` and `xDlClose`
+loadext = []
