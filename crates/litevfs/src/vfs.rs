@@ -115,7 +115,12 @@ impl DatabaseHandle for LiteConnection {
     type WalIndex = sqlite_vfs::WalDisabled;
 
     fn size(&self) -> io::Result<u64> {
-        self.database.read().unwrap().size()
+        let r = self.database.read().unwrap().size();
+        if let Err(ref e) = r {
+            log::warn!("[connection] size: db = {}: {:?}", self.dbname, e);
+        };
+
+        r
     }
 
     fn read_exact_at(&mut self, buf: &mut [u8], offset: u64) -> io::Result<()> {

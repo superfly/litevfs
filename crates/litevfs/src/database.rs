@@ -1,4 +1,4 @@
-use ltx::PageChecksum;
+use crate::pager::{FilesystemPager, Page, Pager, ShortReadPager};
 use sqlite_vfs::OpenAccess;
 use std::{
     collections::{BTreeMap, HashMap},
@@ -7,6 +7,8 @@ use std::{
     sync::{Arc, RwLock},
     time,
 };
+
+const SQLITE_HEADER_SIZE: usize = 100;
 
 pub(crate) struct DatabaseManager {
     base_path: PathBuf,
@@ -44,7 +46,7 @@ impl DatabaseManager {
                 .entry(dbname.into())
                 .or_insert(Arc::new(RwLock::new(Database::new(
                     self.base_path.join(dbname),
-                )))),
+                )?))),
         );
 
         Ok(db)
@@ -58,25 +60,52 @@ impl DatabaseManager {
 
 pub(crate) struct Database {
     path: PathBuf,
+    ltx_path: PathBuf,
     page_size: Option<ltx::PageSize>,
+    pos: Option<ltx::Pos>,
 
-    pages: BTreeMap<ltx::PageNum, Page>,
+    pager: ShortReadPager<FilesystemPager>,
     dirty_pages: BTreeMap<ltx::PageNum, Option<ltx::Checksum>>,
-
-    next_txid: ltx::TXID,
-    pre_apply_checksum: Option<ltx::Checksum>,
 }
 
 impl Database {
-    fn new(path: PathBuf) -> Database {
-        Database {
+    fn new(path: PathBuf) -> io::Result<Database> {
+        let dbpath = path.join("db");
+        let ltx_path = path.join("ltx"); // TODO: temporary
+        fs::create_dir_all(&ltx_path)?;
+
+        let pos = match fs::read(path.join(".pos")) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
+            Ok(data) => Some(
+                serde_json::from_slice(&data)
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
+            ),
+        };
+        let pager = ShortReadPager::new(FilesystemPager::new(dbpath)?);
+        let page_size = match pager.get_page(pos, ltx::PageNum::ONE) {
+            Ok(page) => Some(Database::parse_page_size(page.as_ref())?),
+            Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => None,
+            Err(err) => return Err(err),
+        };
+
+        Ok(Database {
             path,
-            page_size: None,
-            pages: BTreeMap::new(),
+            ltx_path,
+            page_size,
+            pos,
+            pager,
             dirty_pages: BTreeMap::new(),
-            next_txid: ltx::TXID::ONE,
-            pre_apply_checksum: None,
-        }
+        })
+    }
+
+    fn parse_page_size(page1: &[u8]) -> io::Result<ltx::PageSize> {
+        let page_size = match u16::from_be_bytes(page1[16..18].try_into().unwrap()) {
+            1 => 65536,
+            n => n as u32,
+        };
+
+        ltx::PageSize::new(page_size).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
     pub(crate) fn name(&self) -> String {
@@ -88,16 +117,8 @@ impl Database {
             .ok_or(io::Error::new(io::ErrorKind::Other, "page size unknown"))
     }
 
-    fn set_page_size(&mut self, page0: &[u8]) -> io::Result<()> {
-        let page_size = match u16::from_be_bytes(page0[16..18].try_into().unwrap()) {
-            1 => 65536,
-            n => n as u32,
-        };
-
-        self.page_size = Some(
-            ltx::PageSize::new(page_size)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
-        );
+    fn set_page_size(&mut self, page1: &[u8]) -> io::Result<()> {
+        self.page_size = Some(Database::parse_page_size(page1)?);
 
         Ok(())
     }
@@ -112,7 +133,7 @@ impl Database {
                 "offset not page aligned",
             ));
         }
-        if buf.len() > page_size {
+        if buf.len() != page_size {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "unexpected buffer size",
@@ -122,103 +143,59 @@ impl Database {
         Ok(())
     }
 
-    fn ensure_single_page(&self, buf: &[u8], offset: u64) -> io::Result<()> {
-        let page_size = self.page_size()?.into_inner() as usize;
-        let offset = offset as usize % page_size;
-
-        if offset + buf.len() > page_size {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "read requests to multiple pages",
-            ));
-        }
-
-        Ok(())
-    }
-
-    fn page_num_for(&self, offset: u64) -> io::Result<(ltx::PageNum, usize)> {
+    fn page_num_for(&self, offset: u64) -> io::Result<ltx::PageNum> {
         let page_size = self.page_size()?;
-        Ok((
-            ltx::PageNum::new((offset / page_size.into_inner() as u64 + 1) as u32)?,
-            offset as usize % page_size.into_inner() as usize,
-        ))
-    }
-
-    fn get_page(&self, page_num: ltx::PageNum) -> io::Result<&Page> {
-        // TODO: fetch from local cache or LFSC
-        self.pages
-            .get(&page_num)
-            .ok_or(io::ErrorKind::UnexpectedEof.into())
-    }
-
-    fn get_page_mut(&mut self, page_num: ltx::PageNum) -> io::Result<Option<Page>> {
-        // TODO: fetch from local cache or LFSC
-        Ok(self.pages.remove(&page_num))
-    }
-
-    fn put_page(&mut self, page_num: ltx::PageNum, buf: &[u8]) -> io::Result<()> {
-        let page = self.get_page_mut(page_num)?;
-        let original_checksum = self
-            .dirty_pages
-            .get(&page_num)
-            .copied()
-            .unwrap_or_else(|| page.as_ref().map(|p| p.checksum));
-
-        let mut page_buf = match page {
-            Some(p) => p.buf,
-            // TODO: use MaybeUninit?
-            _ => vec![0; self.page_size()?.into_inner() as usize],
-        };
-
-        page_buf.copy_from_slice(buf);
-        let checksum = page_buf.page_checksum(page_num);
-
-        match original_checksum {
-            Some(os) if os == checksum => self.dirty_pages.remove(&page_num),
-            _ => self.dirty_pages.insert(page_num, original_checksum),
-        };
-        self.pages.insert(
-            page_num,
-            Page {
-                buf: page_buf,
-                checksum,
-            },
-        );
-
-        Ok(())
+        Ok(ltx::PageNum::new(
+            (offset / page_size.into_inner() as u64 + 1) as u32,
+        )?)
     }
 
     pub(crate) fn size(&self) -> io::Result<u64> {
-        match self.page_size {
-            None => Ok(0),
-            Some(ps) => Ok(ps.into_inner() as u64 * self.pages.len() as u64),
-        }
+        let page1 = match self.pager.get_page(self.pos, ltx::PageNum::ONE) {
+            Ok(page1) => page1,
+            Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => return Ok(0),
+            Err(err) => return Err(err),
+        };
+        let num_pages = u32::from_be_bytes(page1.as_ref()[28..32].try_into().unwrap());
+
+        Ok(self.page_size()?.into_inner() as u64 * num_pages as u64)
     }
 
     pub(crate) fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
-        if self.page_size.is_none() {
-            return Err(io::ErrorKind::UnexpectedEof.into());
-        }
+        let (number, offset) = if offset as usize <= SQLITE_HEADER_SIZE {
+            (ltx::PageNum::ONE, offset as usize)
+        } else {
+            self.ensure_aligned(buf, offset)?;
+            (self.page_num_for(offset)?, 0)
+        };
 
-        self.ensure_single_page(buf, offset)?;
-        let (page_num, offset) = self.page_num_for(offset)?;
-
-        let page = self.get_page(page_num)?;
-
-        buf.copy_from_slice(&page.buf[offset..offset + buf.len()]);
+        let page = self.pager.get_page(self.pos, number)?;
+        buf.copy_from_slice(&page.as_ref()[offset..offset + buf.len()]);
 
         Ok(())
     }
 
     pub(crate) fn write_at(&mut self, buf: &[u8], offset: u64) -> io::Result<()> {
-        if self.page_size.is_none() && offset == 0 && buf.len() > 100 {
+        if offset == 0 && buf.len() >= SQLITE_HEADER_SIZE {
             self.set_page_size(buf)?;
         }
 
         self.ensure_aligned(buf, offset)?;
-        let (page_num, _) = self.page_num_for(offset)?;
+        let page_num = self.page_num_for(offset)?;
+        let current_checksum = match self.pager.get_page(self.pos, page_num) {
+            Ok(page) => Some(page.checksum()),
+            Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => None,
+            Err(err) => return Err(err),
+        };
 
-        self.put_page(page_num, buf)?;
+        let page = Page::new(page_num, buf.to_vec());
+        self.pager.put_page(&page)?;
+
+        // TODO: we don't detect rollback here, so there will be some LTX files without modifications
+        // Should be resolved once we have on-disk journal.
+        self.dirty_pages
+            .entry(page.number())
+            .or_insert(current_checksum);
 
         Ok(())
     }
@@ -233,50 +210,47 @@ impl Database {
             ));
         }
 
-        let split_off_point = ltx::PageNum::new((size / page_size) as u32)? + 1;
-        self.pages.split_off(&split_off_point);
-        self.dirty_pages.split_off(&split_off_point);
-
-        Ok(())
+        self.pager
+            .truncate(ltx::PageNum::new((size / page_size) as u32)?)
     }
 
     pub(crate) fn committed(&mut self) -> io::Result<()> {
-        let header_page = self.get_page(ltx::PageNum::ONE)?;
+        let page1 = self.pager.get_page(self.pos, ltx::PageNum::ONE)?;
         let commit = ltx::PageNum::new(u32::from_be_bytes(
-            header_page.buf[28..32].try_into().unwrap(),
+            page1.as_ref()[28..32].try_into().unwrap(),
         ))?;
 
-        if self.dirty_pages.len() == 0 {
-            return Ok(());
-        }
+        let txid = if let Some(pos) = self.pos {
+            pos.txid + 1
+        } else {
+            ltx::TXID::ONE
+        };
 
-        let file = fs::File::create(self.path.join(format!("{0}-{0}.ltx", self.next_txid)))?;
+        let file = fs::File::create(self.ltx_path.join(format!("{0}-{0}.ltx", txid)))?;
         let mut enc = ltx::Encoder::new(
             &file,
             &ltx::Header {
                 flags: ltx::HeaderFlags::empty(),
                 page_size: self.page_size()?,
                 commit,
-                min_txid: self.next_txid,
-                max_txid: self.next_txid,
+                min_txid: txid,
+                max_txid: txid,
                 timestamp: time::SystemTime::now(),
-                pre_apply_checksum: self.pre_apply_checksum,
+                pre_apply_checksum: self.pos.map(|p| p.post_apply_checksum),
             },
         )?;
 
         let mut checksum = self
-            .pre_apply_checksum
-            .map(|cs| cs.into_inner())
+            .pos
+            .map(|p| p.post_apply_checksum.into_inner())
             .unwrap_or(0);
         for (&page_num, &prev_checksum) in self.dirty_pages.iter().filter(|&(&n, _)| n <= commit) {
-            if let Some(pcs) = prev_checksum {
-                checksum ^= pcs.into_inner();
-                log::trace!("prev checksum!!!! {:?}", pcs);
-            }
-
-            let page = self.get_page(page_num)?;
-            checksum ^= page.checksum.into_inner();
-            enc.encode_page(page_num, &page.buf)?;
+            let page = self.pager.get_page(self.pos, page_num)?;
+            if let Some(prev_checksum) = prev_checksum {
+                checksum ^= prev_checksum.into_inner();
+            };
+            checksum ^= page.checksum().into_inner();
+            enc.encode_page(page_num, page.as_ref())?;
         }
 
         let checksum = ltx::Checksum::new(checksum);
@@ -284,15 +258,19 @@ impl Database {
         file.sync_all()?;
 
         self.dirty_pages.clear();
+        let pos = ltx::Pos {
+            txid,
+            post_apply_checksum: checksum,
+        };
 
-        self.next_txid = self.next_txid + 1;
-        self.pre_apply_checksum = Some(checksum);
+        // TODO: temporary
+        fs::write(
+            self.path.join(".pos"),
+            serde_json::to_vec_pretty(&pos).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
+        )?;
+
+        self.pos = Some(pos);
 
         Ok(())
     }
-}
-
-struct Page {
-    buf: Vec<u8>,
-    checksum: ltx::Checksum,
 }
