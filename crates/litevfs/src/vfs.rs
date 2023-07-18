@@ -183,6 +183,6 @@ impl DatabaseHandle for LiteConnection {
     }
 
     fn wal_index(&self, _readonly: bool) -> io::Result<Self::WalIndex> {
-        Ok(sqlite_vfs::WalDisabled::default())
+        Ok(sqlite_vfs::WalDisabled)
     }
 }
