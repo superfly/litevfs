@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(clippy::question_mark)]
 //! Create a custom SQLite virtual file system by implementing the [Vfs] trait and registering it
 //! using [register].
