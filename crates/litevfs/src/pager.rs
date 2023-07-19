@@ -12,7 +12,7 @@ pub(crate) trait Pager {
     fn get_page(&self, state: Option<ltx::Pos>, number: ltx::PageNum) -> io::Result<Page>;
 
     /// Stores the database `page`.
-    fn put_page(&self, page: &Page) -> io::Result<()>;
+    fn put_page(&self, page: PageRef) -> io::Result<()>;
 
     /// Removes all database pages after `number`.
     fn truncate(&self, number: ltx::PageNum) -> io::Result<()>;
@@ -24,7 +24,7 @@ pub(crate) trait Pager {
 #[derive(Clone)]
 pub(crate) struct Page {
     data: Arc<Vec<u8>>,
-    number: ltx::PageNum,
+    _number: ltx::PageNum,
     checksum: ltx::Checksum,
 }
 
@@ -34,15 +34,15 @@ impl Page {
         let checksum = data.page_checksum(number);
         Page {
             data: Arc::new(data),
-            number,
+            _number: number,
             checksum,
         }
     }
 
     /// Returns `page` number.
-    pub(crate) fn number(&self) -> ltx::PageNum {
-        self.number
-    }
+    // pub(crate) fn number(&self) -> ltx::PageNum {
+    //     self._number
+    // }
 
     /// Returns `page` checksum.
     pub(crate) fn checksum(&self) -> ltx::Checksum {
@@ -53,6 +53,31 @@ impl Page {
 impl AsRef<[u8]> for Page {
     fn as_ref(&self) -> &[u8] {
         &self.data
+    }
+}
+
+/// A struct that borrows a single database page.
+#[derive(Clone, Copy)]
+pub(crate) struct PageRef<'a> {
+    data: &'a [u8],
+    number: ltx::PageNum,
+}
+
+impl<'a> PageRef<'a> {
+    /// Return a new [PageRef] with `number` and the given `data`.
+    pub(crate) fn new(number: ltx::PageNum, data: &'a [u8]) -> PageRef<'a> {
+        PageRef { data, number }
+    }
+
+    /// Returns `page` number.
+    pub(crate) fn number(&self) -> ltx::PageNum {
+        self.number
+    }
+}
+
+impl<'a> AsRef<[u8]> for PageRef<'a> {
+    fn as_ref(&self) -> &[u8] {
+        self.data
     }
 }
 
@@ -79,7 +104,7 @@ impl<P: Pager> Pager for ShortReadPager<P> {
         }
     }
 
-    fn put_page(&self, page: &Page) -> io::Result<()> {
+    fn put_page(&self, page: PageRef) -> io::Result<()> {
         self.inner.put_page(page)
     }
 
@@ -115,7 +140,7 @@ impl Pager for FilesystemPager {
         Ok(Page::new(number, buf))
     }
 
-    fn put_page(&self, page: &Page) -> io::Result<()> {
+    fn put_page(&self, page: PageRef) -> io::Result<()> {
         let tmp_name = self.root.join(format!("{}.tmp", page.number()));
         let final_name = self.root.join(page.number().to_string());
 

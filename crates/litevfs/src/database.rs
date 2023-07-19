@@ -1,4 +1,4 @@
-use crate::pager::{FilesystemPager, Page, Pager, ShortReadPager};
+use crate::pager::{FilesystemPager, PageRef, Pager, ShortReadPager};
 use sqlite_vfs::OpenAccess;
 use std::{
     collections::{BTreeMap, HashMap},
@@ -117,12 +117,6 @@ impl Database {
             .ok_or(io::Error::new(io::ErrorKind::Other, "page size unknown"))
     }
 
-    fn set_page_size(&mut self, page1: &[u8]) -> io::Result<()> {
-        self.page_size = Some(Database::parse_page_size(page1)?);
-
-        Ok(())
-    }
-
     fn ensure_aligned(&self, buf: &[u8], offset: u64) -> io::Result<()> {
         let page_size = self.page_size()?.into_inner() as usize;
 
@@ -176,8 +170,8 @@ impl Database {
     }
 
     pub(crate) fn write_at(&mut self, buf: &[u8], offset: u64) -> io::Result<()> {
-        if offset == 0 && buf.len() >= SQLITE_HEADER_SIZE {
-            self.set_page_size(buf)?;
+        if self.page_size.is_none() && offset == 0 && buf.len() >= SQLITE_HEADER_SIZE {
+            self.page_size = Some(Database::parse_page_size(buf)?);
         }
 
         self.ensure_aligned(buf, offset)?;
@@ -188,8 +182,8 @@ impl Database {
             Err(err) => return Err(err),
         };
 
-        let page = Page::new(page_num, buf.to_vec());
-        self.pager.put_page(&page)?;
+        let page = PageRef::new(page_num, buf);
+        self.pager.put_page(page)?;
 
         // TODO: we don't detect rollback here, so there will be some LTX files without modifications
         // Should be resolved once we have on-disk journal.
