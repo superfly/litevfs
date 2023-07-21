@@ -254,7 +254,7 @@ pub fn register<F: DatabaseHandle, V: Vfs<Handle = F>>(
         xUnlock: Some(io::unlock::<V, F>),
         xCheckReservedLock: Some(io::check_reserved_lock::<V, F>),
         xFileControl: Some(io::file_control::<V, F>),
-        xSectorSize: Some(io::sector_size::<F>),
+        xSectorSize: Some(io::sector_size),
         xDeviceCharacteristics: Some(io::device_characteristics::<V, F>),
         xShmMap: Some(io::shm_map::<V, F>),
         xShmLock: Some(io::shm_lock::<V, F>),
@@ -294,9 +294,9 @@ pub fn register<F: DatabaseHandle, V: Vfs<Handle = F>>(
         xDlClose: Some(vfs::dlclose::<V>),
         xRandomness: Some(vfs::randomness::<V>),
         xSleep: Some(vfs::sleep::<V>),
-        xCurrentTime: Some(vfs::current_time::<V>),
+        xCurrentTime: Some(vfs::current_time),
         xGetLastError: Some(vfs::get_last_error::<V>),
-        xCurrentTimeInt64: Some(vfs::current_time_int64::<V>),
+        xCurrentTimeInt64: Some(vfs::current_time_int64),
 
         #[cfg(not(feature = "syscall"))]
         xSetSystemCall: None,
@@ -679,10 +679,8 @@ mod vfs {
             };
 
             if let Some(dlerror) = state.parent_vfs.as_ref().and_then(|v| v.xDlError) {
-                return dlerror(state.parent_vfs, n_byte, z_err_msg);
+                dlerror(state.parent_vfs, n_byte, z_err_msg);
             }
-
-            return;
         }
 
         #[cfg(not(feature = "loadext"))]
@@ -729,7 +727,7 @@ mod vfs {
             };
 
             if let Some(dlclose) = state.parent_vfs.as_ref().and_then(|v| v.xDlClose) {
-                return dlclose(state.parent_vfs, p_handle);
+                dlclose(state.parent_vfs, p_handle);
             }
         }
     }
@@ -768,23 +766,20 @@ mod vfs {
     }
 
     /// Return the current time as a Julian Day number in `p_time_out`.
-    pub unsafe extern "C" fn current_time<V>(
+    pub unsafe extern "C" fn current_time(
         p_vfs: *mut ffi::sqlite3_vfs,
         p_time_out: *mut f64,
     ) -> c_int {
         log::trace!("current_time");
 
         let mut i = 0i64;
-        current_time_int64::<V>(p_vfs, &mut i);
+        current_time_int64(p_vfs, &mut i);
 
         *p_time_out = i as f64 / 86400000.0;
         ffi::SQLITE_OK
     }
 
-    pub unsafe extern "C" fn current_time_int64<V>(
-        _p_vfs: *mut ffi::sqlite3_vfs,
-        p: *mut i64,
-    ) -> i32 {
+    pub unsafe extern "C" fn current_time_int64(_vfs: *mut ffi::sqlite3_vfs, p: *mut i64) -> i32 {
         log::trace!("current_time_int64");
 
         const UNIX_EPOCH: i64 = 24405875 * 8640000;
@@ -1066,7 +1061,7 @@ mod io {
 
                         if let Some((wal_index, _)) = state.wal_index.as_mut() {
                             for (region, data) in &mut state.wal_index_regions {
-                                if let Err(err) = wal_index.pull(*region as u32, data) {
+                                if let Err(err) = wal_index.pull(*region, data) {
                                     log::error!(
                                         "[{}] pulling wal index changes failed: {}",
                                         state.id,
@@ -1417,7 +1412,7 @@ mod io {
     }
 
     /// Return the sector-size in bytes for a file.
-    pub unsafe extern "C" fn sector_size<F>(_p_file: *mut ffi::sqlite3_file) -> c_int {
+    pub unsafe extern "C" fn sector_size(_p_file: *mut ffi::sqlite3_file) -> c_int {
         log::trace!("sector_size");
 
         1024
@@ -1594,7 +1589,7 @@ mod io {
                     state.id
                 );
                 for (region, data) in &mut state.wal_index_regions {
-                    if let Err(err) = wal_index.pull(*region as u32, data) {
+                    if let Err(err) = wal_index.pull(*region, data) {
                         return state.set_last_error(ffi::SQLITE_IOERR_SHMLOCK, err);
                     }
                 }
@@ -1611,7 +1606,7 @@ mod io {
                     state.id,
                 );
                 for (region, data) in &mut state.wal_index_regions {
-                    if let Err(err) = wal_index.push(*region as u32, data) {
+                    if let Err(err) = wal_index.push(*region, data) {
                         return state.set_last_error(ffi::SQLITE_IOERR_SHMLOCK, err);
                     }
                 }
@@ -1650,7 +1645,7 @@ mod io {
                 state.id,
             );
             for (region, data) in &mut state.wal_index_regions {
-                if let Err(err) = wal_index.push(*region as u32, data) {
+                if let Err(err) = wal_index.push(*region, data) {
                     log::error!("[{}] pushing wal index changes failed: {}", state.id, err)
                 }
             }
@@ -1669,7 +1664,7 @@ mod io {
                 state.id
             );
             for (region, data) in &mut state.wal_index_regions {
-                if let Err(err) = wal_index.pull(*region as u32, data) {
+                if let Err(err) = wal_index.pull(*region, data) {
                     log::error!("[{}] pulling wal index changes failed: {}", state.id, err)
                 }
             }
