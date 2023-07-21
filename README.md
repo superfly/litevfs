@@ -4,29 +4,30 @@ To test with SQLite CLI:
 
 1) Build the extension:
 ```
-$ cargo build
+$ cargo build --release
 ```
 
-1) Download SQLite sources:
+1) Load the extension
 
 ```
-$ curl -O https://www.sqlite.org/2023/sqlite-amalgamation-3420000.zip
-$ unzip sqlite-amalgamation-3420000.zip
-$ cd sqlite-amalgamation-3420000
+$ sqlite3
+sqlite> .load target/release/liblitevfs.so
 ```
 
-1) Build CLI with extension linked in:
+1) Open the database
 ```
-$ gcc -o sqlite shell.c sqlite3.c \
-    -DSQLITE_EXTRA_INIT=sqlite3_litevfs_init \
-    -L<litevfs directory>/target/debug \
-    -llitevfs
+sqlite> .open db1
 ```
 
-Now `sqlite` binary is linked with LiteVFS and will use it by default.
-
-
-To enable trace log run it as:
+1) (TEMPORARY) Switch to in-memory journal
 ```
-$ RUST_LOG=trace ./sqlite
+sqlite> pragma journal_mode = "memory";
+```
+
+That's it. It should work now. The database is stored under `tmp` (`/tmp/db`) as a set of pages + LTX files.
+
+To enable debug logging, run `sqlite3` binary like this:
+
+```
+$ RUST_LOG=trace sqlite3
 ```
