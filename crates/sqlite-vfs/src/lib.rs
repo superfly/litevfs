@@ -225,102 +225,110 @@ struct State<V> {
     #[cfg(any(feature = "syscall", feature = "loadext"))]
     parent_vfs: *mut ffi::sqlite3_vfs,
     io_methods: ffi::sqlite3_io_methods,
+    api: *const ffi::sqlite3_api_routines,
     last_error: Arc<Mutex<Option<(i32, std::io::Error)>>>,
     next_id: usize,
 }
 
-static mut API: *mut ffi::sqlite3_api_routines = std::ptr::null_mut();
-
-/// Initialize the extension.
-pub fn init_extention(api: *mut ffi::sqlite3_api_routines) {
-    unsafe { API = api };
+// A dynamically loadable SQLite extension.
+pub struct Extension {
+    api: *mut ffi::sqlite3_api_routines,
 }
 
-/// Register a virtual file system ([Vfs]) to SQLite.
-pub fn register<F: DatabaseHandle, V: Vfs<Handle = F>>(
-    name: &str,
-    vfs: V,
-    as_default: bool,
-) -> Result<(), RegisterError> {
-    let io_methods = ffi::sqlite3_io_methods {
-        iVersion: 2,
-        xClose: Some(io::close::<V, F>),
-        xRead: Some(io::read::<V, F>),
-        xWrite: Some(io::write::<V, F>),
-        xTruncate: Some(io::truncate::<V, F>),
-        xSync: Some(io::sync::<V, F>),
-        xFileSize: Some(io::file_size::<V, F>),
-        xLock: Some(io::lock::<V, F>),
-        xUnlock: Some(io::unlock::<V, F>),
-        xCheckReservedLock: Some(io::check_reserved_lock::<V, F>),
-        xFileControl: Some(io::file_control::<V, F>),
-        xSectorSize: Some(io::sector_size),
-        xDeviceCharacteristics: Some(io::device_characteristics::<V, F>),
-        xShmMap: Some(io::shm_map::<V, F>),
-        xShmLock: Some(io::shm_lock::<V, F>),
-        xShmBarrier: Some(io::shm_barrier::<V, F>),
-        xShmUnmap: Some(io::shm_unmap::<V, F>),
-        xFetch: None,
-        xUnfetch: None,
-    };
-    let name = CString::new(name)?;
-    let name_ptr = name.as_ptr();
-    let ptr = Box::into_raw(Box::new(State {
-        name,
-        vfs: Arc::new(vfs),
-        #[cfg(any(feature = "syscall", feature = "loadext"))]
-        parent_vfs: unsafe { ((*API).vfs_find.unwrap())(std::ptr::null_mut()) },
-        io_methods,
-        last_error: Default::default(),
-        next_id: 0,
-    }));
-    let vfs = Box::into_raw(Box::new(ffi::sqlite3_vfs {
-        #[cfg(not(feature = "syscall"))]
-        iVersion: 2,
-        #[cfg(feature = "syscall")]
-        iVersion: 3,
-        szOsFile: size_of::<FileState<V, F>>() as i32,
-        mxPathname: MAX_PATH_LENGTH as i32, // max path length supported by VFS
-        pNext: null_mut(),
-        zName: name_ptr,
-        pAppData: ptr as _,
-        xOpen: Some(vfs::open::<F, V>),
-        xDelete: Some(vfs::delete::<V>),
-        xAccess: Some(vfs::access::<V>),
-        xFullPathname: Some(vfs::full_pathname::<V>),
-        xDlOpen: Some(vfs::dlopen::<V>),
-        xDlError: Some(vfs::dlerror::<V>),
-        xDlSym: Some(vfs::dlsym::<V>),
-        xDlClose: Some(vfs::dlclose::<V>),
-        xRandomness: Some(vfs::randomness::<V>),
-        xSleep: Some(vfs::sleep::<V>),
-        xCurrentTime: Some(vfs::current_time),
-        xGetLastError: Some(vfs::get_last_error::<V>),
-        xCurrentTimeInt64: Some(vfs::current_time_int64),
-
-        #[cfg(not(feature = "syscall"))]
-        xSetSystemCall: None,
-        #[cfg(not(feature = "syscall"))]
-        xGetSystemCall: None,
-        #[cfg(not(feature = "syscall"))]
-        xNextSystemCall: None,
-
-        #[cfg(feature = "syscall")]
-        xSetSystemCall: Some(vfs::set_system_call::<V>),
-        #[cfg(feature = "syscall")]
-        xGetSystemCall: Some(vfs::get_system_call::<V>),
-        #[cfg(feature = "syscall")]
-        xNextSystemCall: Some(vfs::next_system_call::<V>),
-    }));
-
-    let result = unsafe { ((*API).vfs_register.unwrap())(vfs, as_default as i32) };
-    if result != ffi::SQLITE_OK {
-        return Err(RegisterError::Register(result));
+impl Extension {
+    /// Create a new extension with the given SQLite API functions.
+    pub fn new(api: *mut ffi::sqlite3_api_routines) -> Self {
+        Extension { api }
     }
 
-    // TODO: return object that allows to unregister (and cleanup the memory)?
+    /// Register a virtual file system ([Vfs]) to SQLite.
+    pub fn register<F: DatabaseHandle, V: Vfs<Handle = F>>(
+        &self,
+        name: &str,
+        vfs: V,
+        as_default: bool,
+    ) -> Result<(), RegisterError> {
+        let io_methods = ffi::sqlite3_io_methods {
+            iVersion: 2,
+            xClose: Some(io::close::<V, F>),
+            xRead: Some(io::read::<V, F>),
+            xWrite: Some(io::write::<V, F>),
+            xTruncate: Some(io::truncate::<V, F>),
+            xSync: Some(io::sync::<V, F>),
+            xFileSize: Some(io::file_size::<V, F>),
+            xLock: Some(io::lock::<V, F>),
+            xUnlock: Some(io::unlock::<V, F>),
+            xCheckReservedLock: Some(io::check_reserved_lock::<V, F>),
+            xFileControl: Some(io::file_control::<V, F>),
+            xSectorSize: Some(io::sector_size),
+            xDeviceCharacteristics: Some(io::device_characteristics::<V, F>),
+            xShmMap: Some(io::shm_map::<V, F>),
+            xShmLock: Some(io::shm_lock::<V, F>),
+            xShmBarrier: Some(io::shm_barrier::<V, F>),
+            xShmUnmap: Some(io::shm_unmap::<V, F>),
+            xFetch: None,
+            xUnfetch: None,
+        };
+        let name = CString::new(name)?;
+        let name_ptr = name.as_ptr();
+        let ptr = Box::into_raw(Box::new(State {
+            name,
+            vfs: Arc::new(vfs),
+            #[cfg(any(feature = "syscall", feature = "loadext"))]
+            parent_vfs: unsafe { ((*self.api).vfs_find.unwrap())(std::ptr::null_mut()) },
+            api: self.api,
+            io_methods,
+            last_error: Default::default(),
+            next_id: 0,
+        }));
+        let vfs = Box::into_raw(Box::new(ffi::sqlite3_vfs {
+            #[cfg(not(feature = "syscall"))]
+            iVersion: 2,
+            #[cfg(feature = "syscall")]
+            iVersion: 3,
+            szOsFile: size_of::<FileState<V, F>>() as i32,
+            mxPathname: MAX_PATH_LENGTH as i32, // max path length supported by VFS
+            pNext: null_mut(),
+            zName: name_ptr,
+            pAppData: ptr as _,
+            xOpen: Some(vfs::open::<F, V>),
+            xDelete: Some(vfs::delete::<V>),
+            xAccess: Some(vfs::access::<V>),
+            xFullPathname: Some(vfs::full_pathname::<V>),
+            xDlOpen: Some(vfs::dlopen::<V>),
+            xDlError: Some(vfs::dlerror::<V>),
+            xDlSym: Some(vfs::dlsym::<V>),
+            xDlClose: Some(vfs::dlclose::<V>),
+            xRandomness: Some(vfs::randomness::<V>),
+            xSleep: Some(vfs::sleep::<V>),
+            xCurrentTime: Some(vfs::current_time),
+            xGetLastError: Some(vfs::get_last_error::<V>),
+            xCurrentTimeInt64: Some(vfs::current_time_int64),
 
-    Ok(())
+            #[cfg(not(feature = "syscall"))]
+            xSetSystemCall: None,
+            #[cfg(not(feature = "syscall"))]
+            xGetSystemCall: None,
+            #[cfg(not(feature = "syscall"))]
+            xNextSystemCall: None,
+
+            #[cfg(feature = "syscall")]
+            xSetSystemCall: Some(vfs::set_system_call::<V>),
+            #[cfg(feature = "syscall")]
+            xGetSystemCall: Some(vfs::get_system_call::<V>),
+            #[cfg(feature = "syscall")]
+            xNextSystemCall: Some(vfs::next_system_call::<V>),
+        }));
+
+        let result = unsafe { ((*self.api).vfs_register.unwrap())(vfs, as_default as i32) };
+        if result != ffi::SQLITE_OK {
+            return Err(RegisterError::Register(result));
+        }
+
+        // TODO: return object that allows to unregister (and cleanup the memory)?
+
+        Ok(())
+    }
 }
 
 // TODO: add to [Vfs]?
@@ -425,7 +433,8 @@ mod vfs {
         let mut powersafe_overwrite = true;
         if flags & ffi::SQLITE_OPEN_URI > 0 && name.is_some() {
             let param = b"psow\0";
-            if ((*API).uri_boolean.unwrap())(z_name, param.as_ptr() as *const c_char, 1) == 0 {
+            if ((*state.api).uri_boolean.unwrap())(z_name, param.as_ptr() as *const c_char, 1) == 0
+            {
                 powersafe_overwrite = false;
             }
         }

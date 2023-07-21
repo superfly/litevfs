@@ -1,6 +1,6 @@
 use crate::LiteVfs;
 use log::{info, trace};
-use sqlite_vfs::{ffi, register, RegisterError};
+use sqlite_vfs::{ffi, Extension, RegisterError};
 
 #[no_mangle]
 #[allow(non_snake_case)]
@@ -11,10 +11,8 @@ pub extern "C" fn sqlite3_litevfs_init(
 ) -> std::ffi::c_int {
     env_logger::try_init().ok();
 
-    sqlite_vfs::init_extention(pApi);
-
     info!("registering LiteVFS");
-    let code = match register("litevfs", LiteVfs::new("/tmp"), true) {
+    let code = match Extension::new(pApi).register("litevfs", LiteVfs::new("/tmp"), true) {
         Ok(_) => ffi::SQLITE_OK_LOAD_PERMANENTLY,
         Err(RegisterError::Nul(_)) => ffi::SQLITE_ERROR,
         Err(RegisterError::Register(code)) => code,
