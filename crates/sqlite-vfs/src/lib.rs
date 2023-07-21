@@ -1,5 +1,3 @@
-#![allow(clippy::all)]
-#![allow(clippy::question_mark)]
 //! Create a custom SQLite virtual file system by implementing the [Vfs] trait and registering it
 //! using [register].
 
@@ -16,7 +14,8 @@ use std::slice;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-mod ffi;
+#[allow(clippy::all, non_snake_case, non_camel_case_types, dead_code)]
+pub mod ffi;
 
 /// A file opened by [Vfs].
 pub trait DatabaseHandle: Sync {
@@ -230,6 +229,13 @@ struct State<V> {
     next_id: usize,
 }
 
+static mut API: *mut ffi::sqlite3_api_routines = std::ptr::null_mut();
+
+/// Initialize the extension.
+pub fn init_extention(api: *mut ffi::sqlite3_api_routines) {
+    unsafe { API = api };
+}
+
 /// Register a virtual file system ([Vfs]) to SQLite.
 pub fn register<F: DatabaseHandle, V: Vfs<Handle = F>>(
     name: &str,
@@ -263,7 +269,7 @@ pub fn register<F: DatabaseHandle, V: Vfs<Handle = F>>(
         name,
         vfs: Arc::new(vfs),
         #[cfg(any(feature = "syscall", feature = "loadext"))]
-        parent_vfs: unsafe { ffi::sqlite3_vfs_find(std::ptr::null_mut()) },
+        parent_vfs: unsafe { ((*API).vfs_find.unwrap())(std::ptr::null_mut()) },
         io_methods,
         last_error: Default::default(),
         next_id: 0,
@@ -307,7 +313,7 @@ pub fn register<F: DatabaseHandle, V: Vfs<Handle = F>>(
         xNextSystemCall: Some(vfs::next_system_call::<V>),
     }));
 
-    let result = unsafe { ffi::sqlite3_vfs_register(vfs, as_default as i32) };
+    let result = unsafe { ((*API).vfs_register.unwrap())(vfs, as_default as i32) };
     if result != ffi::SQLITE_OK {
         return Err(RegisterError::Register(result));
     }
@@ -419,7 +425,7 @@ mod vfs {
         let mut powersafe_overwrite = true;
         if flags & ffi::SQLITE_OPEN_URI > 0 && name.is_some() {
             let param = b"psow\0";
-            if ffi::sqlite3_uri_boolean(z_name, param.as_ptr() as *const c_char, 1) == 0 {
+            if ((*API).uri_boolean.unwrap())(z_name, param.as_ptr() as *const c_char, 1) == 0 {
                 powersafe_overwrite = false;
             }
         }
@@ -487,9 +493,6 @@ mod vfs {
         });
         state.next_id = state.next_id.overflowing_add(1).0;
 
-        #[cfg(feature = "sqlite_test")]
-        ffi::sqlite3_inc_open_file_count();
-
         ffi::SQLITE_OK
     }
 
@@ -500,11 +503,6 @@ mod vfs {
         z_path: *const c_char,
         _sync_dir: c_int,
     ) -> c_int {
-        // #[cfg(feature = "sqlite_test")]
-        // if simulate_io_error() {
-        //     return ffi::SQLITE_ERROR;
-        // }
-
         let state = match vfs_state::<V>(p_vfs) {
             Ok(state) => state,
             Err(_) => return ffi::SQLITE_DELETE,
@@ -547,11 +545,6 @@ mod vfs {
         flags: c_int,
         p_res_out: *mut c_int,
     ) -> c_int {
-        #[cfg(feature = "sqlite_test")]
-        if simulate_io_error() {
-            return ffi::SQLITE_IOERR_ACCESS;
-        }
-
         let state = match vfs_state::<V>(p_vfs) {
             Ok(state) => state,
             Err(_) => return ffi::SQLITE_ERROR,
@@ -601,11 +594,6 @@ mod vfs {
         n_out: c_int,
         z_out: *mut c_char,
     ) -> c_int {
-        // #[cfg(feature = "sqlite_test")]
-        // if simulate_io_error() {
-        //     return ffi::SQLITE_ERROR;
-        // }
-
         let state = match vfs_state::<V>(p_vfs) {
             Ok(state) => state,
             Err(_) => return ffi::SQLITE_ERROR,
@@ -755,17 +743,13 @@ mod vfs {
         log::trace!("randomness");
 
         let bytes = slice::from_raw_parts_mut(z_buf_out as *mut i8, n_byte as usize);
-        if cfg!(feature = "sqlite_test") {
-            // During testing, the buffer is simply initialized to all zeroes for repeatability
-            bytes.fill(0);
-        } else {
-            let state = match vfs_state::<V>(p_vfs) {
-                Ok(state) => state,
-                Err(_) => return 0,
-            };
+        let state = match vfs_state::<V>(p_vfs) {
+            Ok(state) => state,
+            Err(_) => return 0,
+        };
 
-            state.vfs.random(bytes);
-        }
+        state.vfs.random(bytes);
+
         bytes.len() as c_int
     }
 
@@ -805,12 +789,6 @@ mod vfs {
 
         const UNIX_EPOCH: i64 = 24405875 * 8640000;
         let now = time::OffsetDateTime::now_utc().unix_timestamp() + UNIX_EPOCH;
-        #[cfg(feature = "sqlite_test")]
-        let now = if ffi::sqlite3_get_current_time() > 0 {
-            ffi::sqlite3_get_current_time() as i64 * 1000 + UNIX_EPOCH
-        } else {
-            now
-        };
 
         *p = now;
         ffi::SQLITE_OK
@@ -920,9 +898,6 @@ mod io {
             log::trace!("[{}] close ({})", ext.id, ext.db_name);
         }
 
-        #[cfg(feature = "sqlite_test")]
-        ffi::sqlite3_dec_open_file_count();
-
         ffi::SQLITE_OK
     }
 
@@ -980,20 +955,6 @@ mod io {
         let data = slice::from_raw_parts(z as *mut u8, i_amt as usize);
         let result = state.file.write_all_at(data, i_ofst as u64);
 
-        #[cfg(feature = "sqlite_test")]
-        let result = if simulate_io_error() {
-            Err(ErrorKind::Other.into())
-        } else {
-            result
-        };
-
-        #[cfg(feature = "sqlite_test")]
-        let result = if simulate_diskfull_error() {
-            Err(ErrorKind::WriteZero.into())
-        } else {
-            result
-        };
-
         match result {
             Ok(_) => {}
             Err(err) if err.kind() == ErrorKind::WriteZero => {
@@ -1023,11 +984,6 @@ mod io {
 
         log::trace!("[{}] truncate size={} ({})", state.id, size, state.db_name);
 
-        // #[cfg(feature = "sqlite_test")]
-        // if simulate_io_error() {
-        //     return ffi::SQLITE_IOERR_TRUNCATE;
-        // }
-
         if let Err(err) = state.file.set_len(size) {
             return state.set_last_error(ffi::SQLITE_IOERR_TRUNCATE, err);
         }
@@ -1046,24 +1002,9 @@ mod io {
         };
         log::trace!("[{}] sync ({})", state.id, state.db_name);
 
-        #[cfg(feature = "sqlite_test")]
-        {
-            let is_full_sync = flags & 0x0F == ffi::SQLITE_SYNC_FULL;
-            if is_full_sync {
-                ffi::sqlite3_inc_fullsync_count();
-            }
-            ffi::sqlite3_inc_sync_count();
-        }
-
         if let Err(err) = state.file.sync(flags & ffi::SQLITE_SYNC_DATAONLY > 0) {
             return state.set_last_error(ffi::SQLITE_IOERR_FSYNC, err);
         }
-
-        // #[cfg(feature = "sqlite_test")]
-        // if simulate_io_error() {
-        //     return ffi::SQLITE_ERROR;
-        // }
-
         ffi::SQLITE_OK
     }
 
@@ -1085,11 +1026,6 @@ mod io {
         }) {
             return state.set_last_error(ffi::SQLITE_IOERR_FSTAT, err);
         }
-
-        // #[cfg(feature = "sqlite_test")]
-        // if simulate_io_error() {
-        //     return ffi::SQLITE_ERROR;
-        // }
 
         ffi::SQLITE_OK
     }
@@ -1194,11 +1130,6 @@ mod io {
         };
         log::trace!("[{}] check_reserved_lock ({})", state.id, state.db_name);
 
-        // #[cfg(feature = "sqlite_test")]
-        // if simulate_io_error() {
-        //     return ffi::SQLITE_IOERR_CHECKRESERVEDLOCK;
-        // }
-
         if let Err(err) = state.file.reserved().and_then(|is_reserved| {
             let p_res_out: &mut c_int = p_res_out.as_mut().ok_or_else(null_ptr_error)?;
             *p_res_out = is_reserved as c_int;
@@ -1276,9 +1207,6 @@ mod io {
                     }
                 };
 
-                // #[cfg(feature = "sqlite_test")]
-                // let _benign = simulate_io_error_benign();
-
                 let current = match state.file.size() {
                     Ok(size) => size,
                     Err(err) => return state.set_last_error(ffi::SQLITE_ERROR, err),
@@ -1297,11 +1225,6 @@ mod io {
                 } else if let Err(err) = state.file.set_len(size_hint) {
                     return state.set_last_error(ffi::SQLITE_IOERR_TRUNCATE, err);
                 }
-
-                // #[cfg(feature = "sqlite_test")]
-                // if simulate_io_error() {
-                //     return ffi::SQLITE_IOERR_TRUNCATE;
-                // }
 
                 ffi::SQLITE_OK
             }
@@ -1784,63 +1707,6 @@ mod io {
 
         ffi::SQLITE_OK
     }
-}
-
-// #[cfg(feature = "sqlite_test")]
-// struct Benign;
-
-// #[cfg(feature = "sqlite_test")]
-// #[inline]
-// unsafe fn simulate_io_error_benign() -> Benign {
-//     ffi::sqlite3_set_io_error_benign(1);
-//     Benign
-// }
-
-// #[cfg(feature = "sqlite_test")]
-// impl Drop for Benign {
-//     fn drop(&mut self) {
-//         unsafe { ffi::sqlite3_set_io_error_benign(0) }
-//     }
-// }
-
-// Note: When adding additional simulate_io_error() calls, retest:
-// - malloc.test
-// - ioerr2.test
-// - backup_ioerr.test
-#[cfg(feature = "sqlite_test")]
-#[inline]
-unsafe fn simulate_io_error() -> bool {
-    if (ffi::sqlite3_get_io_error_persist() != 0 && ffi::sqlite3_get_io_error_hit() != 0)
-        || ffi::sqlite3_dec_io_error_pending() == 1
-    {
-        ffi::sqlite3_inc_io_error_hit();
-        if ffi::sqlite3_get_io_error_benign() == 0 {
-            ffi::sqlite3_inc_io_error_hardhit();
-        }
-
-        return true;
-    }
-
-    false
-}
-
-#[cfg(feature = "sqlite_test")]
-#[inline]
-unsafe fn simulate_diskfull_error() -> bool {
-    if ffi::sqlite3_get_diskfull_pending() != 0 {
-        if ffi::sqlite3_get_diskfull_pending() == 1 {
-            if ffi::sqlite3_get_io_error_benign() == 0 {
-                ffi::sqlite3_inc_io_error_hardhit();
-            }
-            ffi::sqlite3_set_diskfull();
-            ffi::sqlite3_set_io_error_hit(1);
-            return true;
-        } else {
-            ffi::sqlite3_dec_diskfull_pending();
-        }
-    }
-
-    false
 }
 
 impl<V> State<V> {
