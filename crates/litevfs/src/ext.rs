@@ -9,7 +9,7 @@ pub extern "C" fn sqlite3_litevfs_init(
     _pzErrMsg: *mut *mut std::ffi::c_char,
     pApi: *mut ffi::sqlite3_api_routines,
 ) -> std::ffi::c_int {
-    env_logger::init();
+    env_logger::try_init().ok();
 
     sqlite_vfs::init_extention(pApi);
 
