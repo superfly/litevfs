@@ -1,8 +1,12 @@
-use crate::pager::{FilesystemPager, PageRef, Pager, ShortReadPager};
+use crate::{
+    locks::{ConnLock, VfsLock},
+    pager::{FilesystemPager, PageRef, Pager, ShortReadPager},
+};
 use sqlite_vfs::OpenAccess;
 use std::{
     collections::{BTreeMap, HashMap},
-    fs, io,
+    fs,
+    io::{self, Read},
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
     time,
@@ -59,6 +63,8 @@ impl DatabaseManager {
 }
 
 pub(crate) struct Database {
+    lock: VfsLock,
+
     path: PathBuf,
     ltx_path: PathBuf,
     page_size: Option<ltx::PageSize>,
@@ -84,12 +90,13 @@ impl Database {
         };
         let pager = ShortReadPager::new(FilesystemPager::new(dbpath)?);
         let page_size = match pager.get_page(pos, ltx::PageNum::ONE) {
-            Ok(page) => Some(Database::parse_page_size(page.as_ref())?),
+            Ok(page) => Some(Database::parse_page_size_database(page.as_ref())?),
             Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => None,
             Err(err) => return Err(err),
         };
 
         Ok(Database {
+            lock: VfsLock::new(),
             path,
             ltx_path,
             page_size,
@@ -99,11 +106,25 @@ impl Database {
         })
     }
 
-    fn parse_page_size(page1: &[u8]) -> io::Result<ltx::PageSize> {
-        let page_size = match u16::from_be_bytes(page1[16..18].try_into().unwrap()) {
+    fn parse_page_size_database(page1: &[u8]) -> io::Result<ltx::PageSize> {
+        let page_size = match u16::from_be_bytes(
+            page1[16..18]
+                .try_into()
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+        ) {
             1 => 65536,
             n => n as u32,
         };
+
+        ltx::PageSize::new(page_size).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    }
+
+    pub(crate) fn parse_page_size_journal(hdr: &[u8]) -> io::Result<ltx::PageSize> {
+        let page_size = u32::from_be_bytes(
+            hdr[24..28]
+                .try_into()
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+        );
 
         ltx::PageSize::new(page_size).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
@@ -112,9 +133,20 @@ impl Database {
         self.path.to_string_lossy().into_owned()
     }
 
-    fn page_size(&self) -> io::Result<ltx::PageSize> {
+    pub(crate) fn conn_lock(&self) -> ConnLock {
+        self.lock.conn_lock()
+    }
+
+    pub(crate) fn journal_path(&self) -> PathBuf {
+        self.path.join("journal")
+    }
+
+    pub(crate) fn page_size(&self) -> io::Result<ltx::PageSize> {
         self.page_size
             .ok_or(io::Error::new(io::ErrorKind::Other, "page size unknown"))
+    }
+    pub(crate) fn set_page_size(&mut self, ps: ltx::PageSize) {
+        self.page_size = Some(ps)
     }
 
     fn ensure_aligned(&self, buf: &[u8], offset: u64) -> io::Result<()> {
@@ -170,8 +202,8 @@ impl Database {
     }
 
     pub(crate) fn write_at(&mut self, buf: &[u8], offset: u64) -> io::Result<()> {
-        if self.page_size.is_none() && offset == 0 && buf.len() >= SQLITE_HEADER_SIZE {
-            self.page_size = Some(Database::parse_page_size(buf)?);
+        if self.page_size().is_err() && offset == 0 && buf.len() >= SQLITE_HEADER_SIZE {
+            self.set_page_size(Database::parse_page_size_database(buf)?);
         }
 
         self.ensure_aligned(buf, offset)?;
@@ -208,7 +240,22 @@ impl Database {
             .truncate(ltx::PageNum::new((size / page_size) as u32)?)
     }
 
-    pub(crate) fn committed(&mut self) -> io::Result<()> {
+    fn is_journal_header_valid(&self) -> io::Result<bool> {
+        const VALID_JOURNAL_HDR: [u8; 8] = [0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7];
+        let mut hdr: [u8; 8] = [0; 8];
+
+        fs::File::open(self.journal_path())?.read_exact(&mut hdr)?;
+
+        Ok(hdr == VALID_JOURNAL_HDR)
+    }
+
+    pub(crate) fn commit_journal(&mut self) -> io::Result<()> {
+        if !self.is_journal_header_valid()? {
+            log::info!("[database] rollback: db = {}", self.name());
+            self.dirty_pages.clear();
+            return Ok(());
+        };
+
         let page1 = self.pager.get_page(self.pos, ltx::PageNum::ONE)?;
         let commit = ltx::PageNum::new(u32::from_be_bytes(
             page1.as_ref()[28..32].try_into().unwrap(),

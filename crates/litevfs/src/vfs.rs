@@ -1,12 +1,13 @@
 use crate::{
     database::{Database, DatabaseManager},
-    locks::{ConnLock, VfsLock},
+    locks::ConnLock,
 };
 use rand::Rng;
-use sqlite_vfs::{DatabaseHandle, LockKind, OpenKind, OpenOptions, Vfs};
+use sqlite_vfs::{LockKind, OpenAccess, OpenKind, OpenOptions, Vfs};
 use std::{
     borrow::Cow,
-    io,
+    fs, io,
+    os::unix::prelude::FileExt,
     path::Path,
     sync::{Arc, Mutex, RwLock},
     thread, time,
@@ -14,46 +15,93 @@ use std::{
 
 /// LiteVfs implements SQLite VFS ops.
 pub struct LiteVfs {
-    lock: VfsLock,
     database_manager: Mutex<DatabaseManager>,
 }
 
 impl Vfs for LiteVfs {
-    type Handle = LiteConnection;
+    type Handle = LiteHandle;
 
     fn open(&self, db: &str, opts: OpenOptions) -> io::Result<Self::Handle> {
         log::trace!("[vfs] open: db = {}, opts = {:?}", db, opts);
 
-        if opts.kind != OpenKind::MainDb {
+        if !matches!(opts.kind, OpenKind::MainDb | OpenKind::MainJournal) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "only main database supported",
+                "unsupported open kind",
             ));
-        }
+        };
+
+        let (dbname, kind) = self.database_name(db)?;
+        if kind != opts.kind {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "unsupported database name",
+            ));
+        };
 
         let database = self
             .database_manager
             .lock()
             .unwrap()
-            .get_database(self.database_name(db)?.as_ref(), opts.access)?;
+            .get_database(dbname.as_ref(), opts.access)?;
+        let conn_lock = database.read().unwrap().conn_lock();
 
-        Ok(LiteConnection::new(database, self.lock.conn_lock()))
+        match opts.kind {
+            OpenKind::MainDb => Ok(LiteHandle::new(
+                LiteDatabaseHandle::new(database),
+                conn_lock,
+            )),
+            OpenKind::MainJournal => Ok(LiteHandle::new(
+                LiteJournalHandle::new(database)?,
+                conn_lock,
+            )),
+            _ => unreachable!(),
+        }
     }
 
     fn delete(&self, db: &str) -> io::Result<()> {
         log::trace!("[vfs] delete: db = {}", db);
 
-        // TODO: We don't delete databases for now
+        let (dbname, kind) = self.database_name(db)?;
+        match kind {
+            OpenKind::MainDb => (),
+            OpenKind::MainJournal => {
+                let database = self
+                    .database_manager
+                    .lock()
+                    .unwrap()
+                    .get_database(dbname.as_ref(), OpenAccess::Write)?;
+                database.write().unwrap().commit_journal()?;
+                fs::remove_file(database.read().unwrap().journal_path())?;
+            }
+            _ => (),
+        };
+
         Ok(())
     }
 
     fn exists(&self, db: &str) -> io::Result<bool> {
         log::trace!("[vfs] exists: db = {}", db);
 
-        self.database_manager
-            .lock()
-            .unwrap()
-            .database_exists(self.database_name(db)?)
+        let (dbname, kind) = self.database_name(db)?;
+        match kind {
+            OpenKind::MainDb => self
+                .database_manager
+                .lock()
+                .unwrap()
+                .database_exists(dbname.as_ref()),
+            OpenKind::MainJournal => {
+                let database = self
+                    .database_manager
+                    .lock()
+                    .unwrap()
+                    .get_database(dbname.as_ref(), OpenAccess::Write)?;
+                let journal = database.read().unwrap().journal_path();
+
+                Ok(journal.exists())
+            }
+            _ => Ok(false),
+        }
     }
 
     fn temporary_name(&self) -> String {
@@ -77,88 +125,147 @@ impl Vfs for LiteVfs {
 impl LiteVfs {
     pub fn new<P: AsRef<Path>>(path: P) -> Self {
         LiteVfs {
-            lock: VfsLock::new(),
             database_manager: Mutex::new(DatabaseManager::new(path)),
         }
     }
 
-    fn database_name<'a>(&self, db: &'a str) -> io::Result<Cow<'a, str>> {
-        Ok(Path::new(db)
-            .file_name()
-            .ok_or(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid database name",
-            ))?
-            .to_string_lossy()) // this is Ok, as LFSC only allows a small subset of chars in DB name
+    fn database_name<'a>(&self, db: &'a str) -> io::Result<(Cow<'a, str>, OpenKind)> {
+        let (db, kind) = if db.ends_with("-journal") {
+            (db.trim_end_matches("-journal"), OpenKind::MainJournal)
+        } else if db.ends_with("-wal") {
+            (db.trim_end_matches("-wal"), OpenKind::Wal)
+        } else {
+            (db, OpenKind::MainDb)
+        };
+
+        Ok((
+            Path::new(db)
+                .file_name()
+                .ok_or(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "invalid database name",
+                ))?
+                .to_string_lossy(), // this is Ok, as LFSC only allows a small subset of chars in DB name
+            kind,
+        ))
     }
 }
 
-pub struct LiteConnection {
-    dbname: String,
-    database: Arc<RwLock<Database>>,
+pub trait DatabaseHandle: Sync {
+    fn size(&self) -> io::Result<u64>;
+    fn read_exact_at(&mut self, buf: &mut [u8], offset: u64) -> io::Result<()>;
+    fn write_all_at(&mut self, buf: &[u8], offset: u64) -> io::Result<()>;
+    fn sync(&mut self, data_only: bool) -> io::Result<()>;
+    fn set_len(&mut self, size: u64) -> io::Result<()>;
+
+    fn handle_type(&self) -> &'static str;
+    fn handle_name(&self) -> String;
+}
+
+pub struct LiteHandle {
+    inner: Box<dyn DatabaseHandle>,
     lock: ConnLock,
 }
 
-impl LiteConnection {
-    pub(crate) fn new(database: Arc<RwLock<Database>>, lock: ConnLock) -> Self {
-        let dbname = database.read().unwrap().name();
-
-        LiteConnection {
-            dbname,
-            database,
+impl LiteHandle {
+    pub(crate) fn new<H>(handler: H, lock: ConnLock) -> LiteHandle
+    where
+        H: DatabaseHandle + 'static,
+    {
+        LiteHandle {
+            inner: Box::new(handler),
             lock,
         }
     }
 }
 
-impl DatabaseHandle for LiteConnection {
+impl sqlite_vfs::DatabaseHandle for LiteHandle {
     type WalIndex = sqlite_vfs::WalDisabled;
 
     fn size(&self) -> io::Result<u64> {
-        let r = self.database.read().unwrap().size();
-        if let Err(ref e) = r {
-            log::warn!("[connection] size: db = {}: {:?}", self.dbname, e);
-        };
+        match self.inner.size() {
+            Err(err) => {
+                log::warn!(
+                    "[handle] size: type = {}, name = {}: {:?}",
+                    self.inner.handle_type(),
+                    self.inner.handle_name(),
+                    err,
+                );
 
-        r
+                Err(err)
+            }
+            Ok(val) => Ok(val),
+        }
     }
 
     fn read_exact_at(&mut self, buf: &mut [u8], offset: u64) -> io::Result<()> {
-        let r = self.database.read().unwrap().read_at(buf, offset);
-        if let Err(ref e) = r {
-            log::warn!(
-                "[connection] read_exact_at: db = {}, len = {}, offset = {}: {:?}",
-                self.dbname,
-                buf.len(),
-                offset,
-                e
-            );
-        };
+        match self.inner.read_exact_at(buf, offset) {
+            Err(err) => {
+                log::warn!(
+                    "[handle] read_exact_at: type = {}, name = {}, len = {}, offset = {}: {:?}",
+                    self.inner.handle_type(),
+                    self.inner.handle_name(),
+                    buf.len(),
+                    offset,
+                    err,
+                );
 
-        r
+                Err(err)
+            }
+            _ => Ok(()),
+        }
     }
 
     fn write_all_at(&mut self, buf: &[u8], offset: u64) -> io::Result<()> {
-        let r = self.database.write().unwrap().write_at(buf, offset);
-        if let Err(ref e) = r {
-            log::warn!(
-                "[connection] write_exact_at: db = {}, len = {}, offset = {}: {:?}",
-                self.dbname,
-                buf.len(),
-                offset,
-                e
-            );
-        };
+        match self.inner.write_all_at(buf, offset) {
+            Err(err) => {
+                log::warn!(
+                    "[handle] write_all_at: type = {}, name = {}, len = {}, offset = {}: {:?}",
+                    self.inner.handle_type(),
+                    self.inner.handle_name(),
+                    buf.len(),
+                    offset,
+                    err,
+                );
 
-        r
+                Err(err)
+            }
+            _ => Ok(()),
+        }
     }
 
-    fn sync(&mut self, _data_only: bool) -> io::Result<()> {
-        Ok(())
+    fn sync(&mut self, data_only: bool) -> io::Result<()> {
+        match self.inner.sync(data_only) {
+            Err(err) => {
+                log::warn!(
+                    "[handle] sync: type = {}, name = {}, data_only = {}: {:?}",
+                    self.inner.handle_type(),
+                    self.inner.handle_name(),
+                    data_only,
+                    err,
+                );
+
+                Err(err)
+            }
+            _ => Ok(()),
+        }
     }
 
     fn set_len(&mut self, size: u64) -> io::Result<()> {
-        self.database.write().unwrap().truncate(size)
+        match self.inner.set_len(size) {
+            Err(err) => {
+                log::warn!(
+                    "[handle] set_len: type = {}, name = {}, size = {}: {:?}",
+                    self.inner.handle_type(),
+                    self.inner.handle_name(),
+                    size,
+                    err,
+                );
+
+                Err(err)
+            }
+            _ => Ok(()),
+        }
     }
 
     fn lock(&mut self, lock: LockKind) -> io::Result<bool> {
@@ -173,16 +280,104 @@ impl DatabaseHandle for LiteConnection {
         Ok(self.lock.state())
     }
 
-    fn committed(&self) -> io::Result<()> {
-        let r = self.database.write().unwrap().committed();
-        if let Err(ref e) = r {
-            log::warn!("[connection] committed: db = {}: {:?}", self.dbname, e);
-        };
-
-        r
-    }
-
     fn wal_index(&self, _readonly: bool) -> io::Result<Self::WalIndex> {
         Ok(sqlite_vfs::WalDisabled)
+    }
+}
+
+struct LiteDatabaseHandle {
+    database: Arc<RwLock<Database>>,
+}
+
+impl LiteDatabaseHandle {
+    pub(crate) fn new(database: Arc<RwLock<Database>>) -> Self {
+        LiteDatabaseHandle { database }
+    }
+}
+
+impl DatabaseHandle for LiteDatabaseHandle {
+    fn size(&self) -> io::Result<u64> {
+        self.database.read().unwrap().size()
+    }
+
+    fn read_exact_at(&mut self, buf: &mut [u8], offset: u64) -> io::Result<()> {
+        self.database.read().unwrap().read_at(buf, offset)
+    }
+
+    fn write_all_at(&mut self, buf: &[u8], offset: u64) -> io::Result<()> {
+        self.database.write().unwrap().write_at(buf, offset)
+    }
+    fn sync(&mut self, _data_only: bool) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn set_len(&mut self, size: u64) -> io::Result<()> {
+        self.database.write().unwrap().truncate(size)
+    }
+
+    fn handle_type(&self) -> &'static str {
+        "database"
+    }
+    fn handle_name(&self) -> String {
+        self.database.read().unwrap().name()
+    }
+}
+
+struct LiteJournalHandle {
+    journal: fs::File,
+    database: Arc<RwLock<Database>>,
+}
+
+impl LiteJournalHandle {
+    pub(crate) fn new(database: Arc<RwLock<Database>>) -> io::Result<Self> {
+        let journal = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(database.read().unwrap().journal_path())?;
+
+        Ok(LiteJournalHandle { journal, database })
+    }
+}
+
+impl DatabaseHandle for LiteJournalHandle {
+    fn size(&self) -> io::Result<u64> {
+        self.journal.metadata().map(|m| m.len())
+    }
+
+    fn read_exact_at(&mut self, buf: &mut [u8], offset: u64) -> io::Result<()> {
+        self.journal.read_exact_at(buf, offset)
+    }
+
+    fn write_all_at(&mut self, buf: &[u8], offset: u64) -> io::Result<()> {
+        const JOURNAL_HDR_SIZE: usize = 28;
+
+        {
+            let mut db = self.database.write().unwrap();
+            if offset == 0 && buf.len() >= JOURNAL_HDR_SIZE && db.page_size().is_err() {
+                db.set_page_size(Database::parse_page_size_journal(buf)?);
+            };
+            if offset == 0 && buf.len() == JOURNAL_HDR_SIZE && buf.iter().all(|&b| b == 0) {
+                db.commit_journal()?;
+            };
+        }
+
+        self.journal.write_all_at(buf, offset)
+    }
+
+    fn sync(&mut self, _data_only: bool) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn set_len(&mut self, size: u64) -> io::Result<()> {
+        self.database.write().unwrap().commit_journal()?;
+        self.journal.set_len(size)
+    }
+
+    fn handle_type(&self) -> &'static str {
+        "journal"
+    }
+    fn handle_name(&self) -> String {
+        self.database.read().unwrap().name()
     }
 }
