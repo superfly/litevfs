@@ -67,6 +67,16 @@ pub trait DatabaseHandle: Sync {
         Ok(())
     }
 
+    /// Process a `pragma` statement. A return value of `None` indicates that the VFS has
+    /// not processed the `pragma` and the normal processing should continue.
+    fn pragma(
+        &mut self,
+        _pragma: &str,
+        _value: Option<&str>,
+    ) -> Option<Result<Option<String>, std::io::Error>> {
+        None
+    }
+
     /// Check if the underlying data of the handle got moved or deleted. When moved, the handle can
     /// still be read from, but not written to anymore.
     fn moved(&self) -> Result<bool, std::io::Error> {
@@ -347,6 +357,7 @@ struct FileExt<V, F: DatabaseHandle> {
     db_name: String,
     file: F,
     delete_on_close: bool,
+    api: *const ffi::sqlite3_api_routines,
     /// The last error; shared with the VFS.
     last_error: Arc<Mutex<Option<(i32, std::io::Error)>>>,
     /// The last error number of this file/connection (not shared with the VFS).
@@ -489,6 +500,7 @@ mod vfs {
             db_name: name,
             file,
             delete_on_close: opts.delete_on_close,
+            api: state.api,
             last_error: Arc::clone(&state.last_error),
             last_errno: 0,
             wal_index: None,
@@ -680,13 +692,13 @@ mod vfs {
     ) {
         log::trace!("dlerror");
 
+        let state = match vfs_state::<V>(p_vfs) {
+            Ok(state) => state,
+            Err(_) => return,
+        };
+
         #[cfg(feature = "loadext")]
         {
-            let state = match vfs_state::<V>(p_vfs) {
-                Ok(state) => state,
-                Err(_) => return,
-            };
-
             if let Some(dlerror) = state.parent_vfs.as_ref().and_then(|v| v.xDlError) {
                 dlerror(state.parent_vfs, n_byte, z_err_msg);
             }
@@ -695,7 +707,7 @@ mod vfs {
         #[cfg(not(feature = "loadext"))]
         {
             let msg = concat!("Loadable extensions are not supported", "\0");
-            ffi::sqlite3_snprintf(n_byte, z_err_msg, msg.as_ptr() as _);
+            (*state.api).snprintf(n_byte, z_err_msg, msg.as_ptr() as _);
         }
     }
 
@@ -1308,7 +1320,34 @@ mod io {
             }
 
             // Optionally intercept PRAGMA statements. Always fall back to normal pragma processing.
-            ffi::SQLITE_FCNTL_PRAGMA => ffi::SQLITE_NOTFOUND,
+            ffi::SQLITE_FCNTL_PRAGMA => {
+                let p_arg = (p_arg as *mut *const c_char).as_mut().unwrap();
+
+                let parts = unsafe { slice::from_raw_parts(p_arg, 3) };
+                let pragma = CStr::from_ptr(parts[1]).to_string_lossy();
+                let val = if parts[2].is_null() {
+                    None
+                } else {
+                    Some(CStr::from_ptr(parts[2]).to_string_lossy())
+                };
+
+                match state.file.pragma(pragma.as_ref(), val.as_deref()) {
+                    None => ffi::SQLITE_NOTFOUND,
+                    Some(Ok(Some(ret))) => {
+                        let ret = CString::new(ret.as_bytes()).unwrap();
+                        let ret = (*state.api).mprintf.unwrap()(ret.into_raw());
+                        *p_arg = ret;
+                        ffi::SQLITE_OK
+                    }
+                    Some(Ok(None)) => ffi::SQLITE_OK,
+                    Some(Err(err)) => {
+                        let err = CString::new(err.to_string().as_bytes()).unwrap();
+                        let err = (*state.api).mprintf.unwrap()(err.into_raw());
+                        *p_arg = err;
+                        ffi::SQLITE_ERROR
+                    }
+                }
+            }
 
             // May be invoked by SQLite on the database file handle shortly after it is opened in
             // order to provide a custom VFS with access to the connection's busy-handler callback.
