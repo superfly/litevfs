@@ -163,6 +163,14 @@ pub trait DatabaseHandle: Sync {
         unreachable!("should not be called");
     }
 
+    fn pragma(
+        &mut self,
+        _pragma: &str,
+        _val: Option<&str>,
+    ) -> Option<Result<Option<String>, io::Error>> {
+        None
+    }
+
     fn handle_type(&self) -> &'static str;
     fn handle_name(&self) -> String;
 }
@@ -283,6 +291,27 @@ impl sqlite_vfs::DatabaseHandle for LiteHandle {
         Ok(self.inner.current_lock())
     }
 
+    fn pragma(
+        &mut self,
+        pragma: &str,
+        val: Option<&str>,
+    ) -> Option<Result<Option<String>, io::Error>> {
+        match self.inner.pragma(pragma, val) {
+            Some(Err(err)) => {
+                let val = if let Some(val) = val { val } else { "<none>" };
+                log::warn!(
+                    "[handle] pragma: pragma = {}, value = {}: {:?}",
+                    pragma,
+                    val,
+                    err
+                );
+
+                Some(Err(err))
+            }
+            x => x,
+        }
+    }
+
     fn wal_index(&self, _readonly: bool) -> io::Result<Self::WalIndex> {
         Ok(sqlite_vfs::WalDisabled)
     }
@@ -329,6 +358,19 @@ impl DatabaseHandle for LiteDatabaseHandle {
 
     fn current_lock(&self) -> LockKind {
         self.lock.state()
+    }
+
+    fn pragma(
+        &mut self,
+        pragma: &str,
+        val: Option<&str>,
+    ) -> Option<Result<Option<String>, io::Error>> {
+        match (pragma, val) {
+            ("journal_mode", Some(val)) if val.to_uppercase() == "WAL" => {
+                Some(Ok(Some("WAL is not supported by LiteVFS".into())))
+            }
+            _ => None,
+        }
     }
 
     fn handle_type(&self) -> &'static str {
