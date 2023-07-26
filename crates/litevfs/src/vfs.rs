@@ -47,14 +47,10 @@ impl Vfs for LiteVfs {
         let conn_lock = database.read().unwrap().conn_lock();
 
         match opts.kind {
-            OpenKind::MainDb => Ok(LiteHandle::new(
-                LiteDatabaseHandle::new(database),
-                conn_lock,
-            )),
-            OpenKind::MainJournal => Ok(LiteHandle::new(
-                LiteJournalHandle::new(database)?,
-                conn_lock,
-            )),
+            OpenKind::MainDb => Ok(LiteHandle::new(LiteDatabaseHandle::new(
+                database, conn_lock,
+            ))),
+            OpenKind::MainJournal => Ok(LiteHandle::new(LiteJournalHandle::new(database)?)),
             _ => unreachable!(),
         }
     }
@@ -157,6 +153,15 @@ pub trait DatabaseHandle: Sync {
     fn write_all_at(&mut self, buf: &[u8], offset: u64) -> io::Result<()>;
     fn sync(&mut self, data_only: bool) -> io::Result<()>;
     fn set_len(&mut self, size: u64) -> io::Result<()>;
+    fn lock(&mut self, _lock: LockKind) -> bool {
+        unreachable!("should not be called");
+    }
+    fn reserved(&mut self) -> bool {
+        unreachable!("should not be called");
+    }
+    fn current_lock(&self) -> LockKind {
+        unreachable!("should not be called");
+    }
 
     fn handle_type(&self) -> &'static str;
     fn handle_name(&self) -> String;
@@ -164,17 +169,15 @@ pub trait DatabaseHandle: Sync {
 
 pub struct LiteHandle {
     inner: Box<dyn DatabaseHandle>,
-    lock: ConnLock,
 }
 
 impl LiteHandle {
-    pub(crate) fn new<H>(handler: H, lock: ConnLock) -> LiteHandle
+    pub(crate) fn new<H>(handler: H) -> LiteHandle
     where
         H: DatabaseHandle + 'static,
     {
         LiteHandle {
             inner: Box::new(handler),
-            lock,
         }
     }
 }
@@ -269,15 +272,15 @@ impl sqlite_vfs::DatabaseHandle for LiteHandle {
     }
 
     fn lock(&mut self, lock: LockKind) -> io::Result<bool> {
-        Ok(self.lock.acquire(lock))
+        Ok(self.inner.lock(lock))
     }
 
     fn reserved(&mut self) -> io::Result<bool> {
-        Ok(self.lock.reserved())
+        Ok(self.inner.reserved())
     }
 
     fn current_lock(&self) -> io::Result<LockKind> {
-        Ok(self.lock.state())
+        Ok(self.inner.current_lock())
     }
 
     fn wal_index(&self, _readonly: bool) -> io::Result<Self::WalIndex> {
@@ -287,11 +290,12 @@ impl sqlite_vfs::DatabaseHandle for LiteHandle {
 
 struct LiteDatabaseHandle {
     database: Arc<RwLock<Database>>,
+    lock: ConnLock,
 }
 
 impl LiteDatabaseHandle {
-    pub(crate) fn new(database: Arc<RwLock<Database>>) -> Self {
-        LiteDatabaseHandle { database }
+    pub(crate) fn new(database: Arc<RwLock<Database>>, lock: ConnLock) -> Self {
+        LiteDatabaseHandle { database, lock }
     }
 }
 
@@ -313,6 +317,18 @@ impl DatabaseHandle for LiteDatabaseHandle {
 
     fn set_len(&mut self, size: u64) -> io::Result<()> {
         self.database.write().unwrap().truncate(size)
+    }
+
+    fn lock(&mut self, lock: LockKind) -> bool {
+        self.lock.acquire(lock)
+    }
+
+    fn reserved(&mut self) -> bool {
+        self.lock.reserved()
+    }
+
+    fn current_lock(&self) -> LockKind {
+        self.lock.state()
     }
 
     fn handle_type(&self) -> &'static str {
