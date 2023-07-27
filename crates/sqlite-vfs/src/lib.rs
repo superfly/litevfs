@@ -229,35 +229,78 @@ pub enum LockKind {
     Exclusive,
 }
 
+#[derive(Clone)]
+struct ApiRoutines {
+    pub vfs_find: unsafe extern "C" fn(arg1: *const c_char) -> *mut ffi::sqlite3_vfs,
+    pub vfs_register: unsafe extern "C" fn(arg1: *mut ffi::sqlite3_vfs, arg2: c_int) -> c_int,
+    pub uri_boolean:
+        unsafe extern "C" fn(arg1: *const c_char, arg2: *const c_char, arg3: c_int) -> c_int,
+    pub mprintf: unsafe extern "C" fn(arg1: *const c_char, ...) -> *mut c_char,
+}
+
 struct State<V> {
     name: CString,
     vfs: Arc<V>,
     #[cfg(any(feature = "syscall", feature = "loadext"))]
     parent_vfs: *mut ffi::sqlite3_vfs,
     io_methods: ffi::sqlite3_io_methods,
-    api: *const ffi::sqlite3_api_routines,
+    api: ApiRoutines,
     last_error: Arc<Mutex<Option<(i32, std::io::Error)>>>,
     next_id: usize,
 }
 
-// A dynamically loadable SQLite extension.
+/// A dynamically loadable SQLite VFS extension.
+pub struct DynamicExtension {}
+
+impl DynamicExtension {
+    /// Create a new extension with the given SQLite API functions.
+    ///
+    /// # Safety
+    /// Must be called with `sqlite3_api_routines` provided by SQLite.
+    pub unsafe fn build(api: *mut ffi::sqlite3_api_routines) -> Extension {
+        Extension {
+            api: ApiRoutines {
+                vfs_find: (*api).vfs_find.unwrap(),
+                vfs_register: (*api).vfs_register.unwrap(),
+                uri_boolean: (*api).uri_boolean.unwrap(),
+                mprintf: (*api).mprintf.unwrap(),
+            },
+        }
+    }
+}
+
+/// A linked-in SQLite VFS extension.
+pub struct LinkedExtension;
+
+impl LinkedExtension {
+    /// Create a new extension.
+    pub fn build() -> Extension {
+        Extension {
+            api: ApiRoutines {
+                vfs_find: ffi::sqlite3_vfs_find,
+                vfs_register: ffi::sqlite3_vfs_register,
+                uri_boolean: ffi::sqlite3_uri_boolean,
+                mprintf: ffi::sqlite3_mprintf,
+            },
+        }
+    }
+}
+
+/// SQLite VFS extension.
 pub struct Extension {
-    api: *mut ffi::sqlite3_api_routines,
+    api: ApiRoutines,
 }
 
 impl Extension {
-    /// Create a new extension with the given SQLite API functions.
-    pub fn new(api: *mut ffi::sqlite3_api_routines) -> Self {
-        Extension { api }
-    }
-
     /// Register a virtual file system ([Vfs]) to SQLite.
     pub fn register<F: DatabaseHandle, V: Vfs<Handle = F>>(
-        &self,
+        self,
         name: &str,
         vfs: V,
         as_default: bool,
     ) -> Result<(), RegisterError> {
+        let api = self.api.clone();
+
         let io_methods = ffi::sqlite3_io_methods {
             iVersion: 2,
             xClose: Some(io::close::<V, F>),
@@ -285,7 +328,7 @@ impl Extension {
             name,
             vfs: Arc::new(vfs),
             #[cfg(any(feature = "syscall", feature = "loadext"))]
-            parent_vfs: unsafe { ((*self.api).vfs_find.unwrap())(std::ptr::null_mut()) },
+            parent_vfs: unsafe { (api.vfs_find)(std::ptr::null_mut()) },
             api: self.api,
             io_methods,
             last_error: Default::default(),
@@ -330,7 +373,7 @@ impl Extension {
             xNextSystemCall: Some(vfs::next_system_call::<V>),
         }));
 
-        let result = unsafe { ((*self.api).vfs_register.unwrap())(vfs, as_default as i32) };
+        let result = unsafe { (api.vfs_register)(vfs, as_default as i32) };
         if result != ffi::SQLITE_OK {
             return Err(RegisterError::Register(result));
         }
@@ -357,7 +400,7 @@ struct FileExt<V, F: DatabaseHandle> {
     db_name: String,
     file: F,
     delete_on_close: bool,
-    api: *const ffi::sqlite3_api_routines,
+    api: ApiRoutines,
     /// The last error; shared with the VFS.
     last_error: Arc<Mutex<Option<(i32, std::io::Error)>>>,
     /// The last error number of this file/connection (not shared with the VFS).
@@ -444,8 +487,7 @@ mod vfs {
         let mut powersafe_overwrite = true;
         if flags & ffi::SQLITE_OPEN_URI > 0 && name.is_some() {
             let param = b"psow\0";
-            if ((*state.api).uri_boolean.unwrap())(z_name, param.as_ptr() as *const c_char, 1) == 0
-            {
+            if (state.api.uri_boolean)(z_name, param.as_ptr() as *const c_char, 1) == 0 {
                 powersafe_overwrite = false;
             }
         }
@@ -500,7 +542,7 @@ mod vfs {
             db_name: name,
             file,
             delete_on_close: opts.delete_on_close,
-            api: state.api,
+            api: state.api.clone(),
             last_error: Arc::clone(&state.last_error),
             last_errno: 0,
             wal_index: None,
@@ -1335,14 +1377,14 @@ mod io {
                     None => ffi::SQLITE_NOTFOUND,
                     Some(Ok(Some(ret))) => {
                         let ret = CString::new(ret.as_bytes()).unwrap();
-                        let ret = (*state.api).mprintf.unwrap()(ret.into_raw());
+                        let ret = (state.api.mprintf)(ret.into_raw());
                         *p_arg = ret;
                         ffi::SQLITE_OK
                     }
                     Some(Ok(None)) => ffi::SQLITE_OK,
                     Some(Err(err)) => {
                         let err = CString::new(err.to_string().as_bytes()).unwrap();
-                        let err = (*state.api).mprintf.unwrap()(err.into_raw());
+                        let err = (state.api.mprintf)(err.into_raw());
                         *p_arg = err;
                         ffi::SQLITE_ERROR
                     }
