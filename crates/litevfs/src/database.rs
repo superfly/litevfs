@@ -217,8 +217,6 @@ impl Database {
         let page = PageRef::new(page_num, buf);
         self.pager.put_page(page)?;
 
-        // TODO: we don't detect rollback here, so there will be some LTX files without modifications
-        // Should be resolved once we have on-disk journal.
         self.dirty_pages
             .entry(page.number())
             .or_insert(current_checksum);

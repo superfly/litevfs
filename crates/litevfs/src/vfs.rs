@@ -5,7 +5,6 @@ use crate::{
 use rand::Rng;
 use sqlite_vfs::{LockKind, OpenAccess, OpenKind, OpenOptions, Vfs};
 use std::{
-    borrow::Cow,
     fs, io,
     os::unix::prelude::FileExt,
     path::Path,
@@ -31,7 +30,7 @@ impl Vfs for LiteVfs {
             ));
         };
 
-        let (dbname, kind) = self.database_name(db)?;
+        let (dbname, kind) = self.database_name_kind(db);
         if kind != opts.kind {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -58,7 +57,7 @@ impl Vfs for LiteVfs {
     fn delete(&self, db: &str) -> io::Result<()> {
         log::trace!("[vfs] delete: db = {}", db);
 
-        let (dbname, kind) = self.database_name(db)?;
+        let (dbname, kind) = self.database_name_kind(db);
         match kind {
             OpenKind::MainDb => (),
             OpenKind::MainJournal => {
@@ -79,13 +78,13 @@ impl Vfs for LiteVfs {
     fn exists(&self, db: &str) -> io::Result<bool> {
         log::trace!("[vfs] exists: db = {}", db);
 
-        let (dbname, kind) = self.database_name(db)?;
+        let (dbname, kind) = self.database_name_kind(db);
         match kind {
             OpenKind::MainDb => self
                 .database_manager
                 .lock()
                 .unwrap()
-                .database_exists(dbname.as_ref()),
+                .database_exists(dbname),
             OpenKind::MainJournal => {
                 let database = self
                     .database_manager
@@ -125,25 +124,14 @@ impl LiteVfs {
         }
     }
 
-    fn database_name<'a>(&self, db: &'a str) -> io::Result<(Cow<'a, str>, OpenKind)> {
-        let (db, kind) = if db.ends_with("-journal") {
-            (db.trim_end_matches("-journal"), OpenKind::MainJournal)
-        } else if db.ends_with("-wal") {
+    fn database_name_kind<'a>(&self, db: &'a str) -> (&'a str, OpenKind) {
+        if let Some(db) = db.strip_suffix("-journal") {
+            (db, OpenKind::MainJournal)
+        } else if let Some(db) = db.strip_suffix("-wal") {
             (db.trim_end_matches("-wal"), OpenKind::Wal)
         } else {
             (db, OpenKind::MainDb)
-        };
-
-        Ok((
-            Path::new(db)
-                .file_name()
-                .ok_or(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "invalid database name",
-                ))?
-                .to_string_lossy(), // this is Ok, as LFSC only allows a small subset of chars in DB name
-            kind,
-        ))
+        }
     }
 }
 
@@ -151,7 +139,9 @@ pub trait DatabaseHandle: Sync {
     fn size(&self) -> io::Result<u64>;
     fn read_exact_at(&mut self, buf: &mut [u8], offset: u64) -> io::Result<()>;
     fn write_all_at(&mut self, buf: &[u8], offset: u64) -> io::Result<()>;
-    fn sync(&mut self, data_only: bool) -> io::Result<()>;
+    fn sync(&mut self, _data_only: bool) -> io::Result<()> {
+        Ok(())
+    }
     fn set_len(&mut self, size: u64) -> io::Result<()>;
     fn lock(&mut self, _lock: LockKind) -> bool {
         unreachable!("should not be called");
@@ -340,9 +330,6 @@ impl DatabaseHandle for LiteDatabaseHandle {
     fn write_all_at(&mut self, buf: &[u8], offset: u64) -> io::Result<()> {
         self.database.write().unwrap().write_at(buf, offset)
     }
-    fn sync(&mut self, _data_only: bool) -> io::Result<()> {
-        Ok(())
-    }
 
     fn set_len(&mut self, size: u64) -> io::Result<()> {
         self.database.write().unwrap().truncate(size)
@@ -421,10 +408,6 @@ impl DatabaseHandle for LiteJournalHandle {
         }
 
         self.journal.write_all_at(buf, offset)
-    }
-
-    fn sync(&mut self, _data_only: bool) -> io::Result<()> {
-        Ok(())
     }
 
     fn set_len(&mut self, size: u64) -> io::Result<()> {
