@@ -354,7 +354,10 @@ impl DatabaseHandle for LiteDatabaseHandle {
     ) -> Option<Result<Option<String>, io::Error>> {
         match (pragma, val) {
             ("journal_mode", Some(val)) if val.to_uppercase() == "WAL" => {
-                Some(Ok(Some("WAL is not supported by LiteVFS".into())))
+                Some(Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "WAL is not supported by LiteVFS",
+                )))
             }
             _ => None,
         }
