@@ -1,20 +1,26 @@
 use crate::{
     database::{Database, DatabaseManager},
-    locks::ConnLock,
+    locks::{ConnLock, VfsLock},
 };
 use rand::Rng;
 use sqlite_vfs::{LockKind, OpenAccess, OpenKind, OpenOptions, Vfs};
 use std::{
     fs, io,
     os::unix::prelude::FileExt,
-    path::Path,
-    sync::{Arc, Mutex, RwLock},
+    path::{Path, PathBuf},
+    process,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, RwLock,
+    },
     thread, time,
 };
 
 /// LiteVfs implements SQLite VFS ops.
 pub struct LiteVfs {
+    path: PathBuf,
     database_manager: Mutex<DatabaseManager>,
+    temp_counter: AtomicU64,
 }
 
 impl Vfs for LiteVfs {
@@ -23,7 +29,10 @@ impl Vfs for LiteVfs {
     fn open(&self, db: &str, opts: OpenOptions) -> io::Result<Self::Handle> {
         log::trace!("[vfs] open: db = {}, opts = {:?}", db, opts);
 
-        if !matches!(opts.kind, OpenKind::MainDb | OpenKind::MainJournal) {
+        if !matches!(
+            opts.kind,
+            OpenKind::MainDb | OpenKind::TempDb | OpenKind::MainJournal | OpenKind::TempJournal
+        ) {
             log::warn!(
                 "[vfs] open: db = {}, opts = {:?}: unsupported open kind",
                 db,
@@ -36,25 +45,40 @@ impl Vfs for LiteVfs {
         };
 
         let (dbname, kind) = self.database_name_kind(db);
-        if kind != opts.kind {
+        if kind != opts.kind && (opts.kind != OpenKind::TempJournal && kind != OpenKind::TempDb) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "unsupported database name",
             ));
         };
 
-        let database = self
-            .database_manager
-            .lock()
-            .unwrap()
-            .get_database(dbname, opts.access)?;
-        let conn_lock = database.read().unwrap().conn_lock();
+        match kind {
+            OpenKind::MainDb => {
+                let database = self
+                    .database_manager
+                    .lock()
+                    .unwrap()
+                    .get_database(dbname, opts.access)?;
+                let conn_lock = database.read().unwrap().conn_lock();
 
-        match opts.kind {
-            OpenKind::MainDb => Ok(LiteHandle::new(LiteDatabaseHandle::new(
-                database, conn_lock,
-            ))),
-            OpenKind::MainJournal => Ok(LiteHandle::new(LiteJournalHandle::new(database)?)),
+                Ok(LiteHandle::new(LiteDatabaseHandle::new(
+                    database, conn_lock,
+                )))
+            }
+            OpenKind::TempDb => Ok(LiteHandle::new(LiteTempDbHandle::new(
+                self.path.join(db),
+                opts.access,
+            )?)),
+
+            OpenKind::MainJournal => {
+                let database = self
+                    .database_manager
+                    .lock()
+                    .unwrap()
+                    .get_database(dbname, opts.access)?;
+
+                Ok(LiteHandle::new(LiteJournalHandle::new(database)?))
+            }
             _ => unreachable!(),
         }
     }
@@ -105,7 +129,11 @@ impl Vfs for LiteVfs {
     }
 
     fn temporary_name(&self) -> String {
-        "main.db".into()
+        format!(
+            "sfvetil-{:x}_{:x}.db",
+            process::id(),
+            self.temp_counter.fetch_add(1, Ordering::AcqRel)
+        )
     }
 
     fn random(&self, buffer: &mut [i8]) {
@@ -125,7 +153,9 @@ impl Vfs for LiteVfs {
 impl LiteVfs {
     pub fn new<P: AsRef<Path>>(path: P) -> Self {
         LiteVfs {
+            path: path.as_ref().to_path_buf(),
             database_manager: Mutex::new(DatabaseManager::new(path)),
+            temp_counter: AtomicU64::new(0),
         }
     }
 
@@ -134,6 +164,8 @@ impl LiteVfs {
             (db, OpenKind::MainJournal)
         } else if let Some(db) = db.strip_suffix("-wal") {
             (db.trim_end_matches("-wal"), OpenKind::Wal)
+        } else if db.starts_with("sfvetil-") {
+            (db, OpenKind::TempDb)
         } else {
             (db, OpenKind::MainDb)
         }
@@ -428,5 +460,70 @@ impl DatabaseHandle for LiteJournalHandle {
     }
     fn handle_name(&self) -> String {
         self.database.read().unwrap().name()
+    }
+}
+
+struct LiteTempDbHandle {
+    name: PathBuf,
+    file: fs::File,
+    lock: ConnLock,
+}
+
+impl LiteTempDbHandle {
+    pub(crate) fn new<P: AsRef<Path>>(path: P, access: OpenAccess) -> io::Result<Self> {
+        let mut o = fs::OpenOptions::new();
+        o.read(true).write(access != OpenAccess::Read);
+        match access {
+            OpenAccess::Create => {
+                o.create(true);
+            }
+            OpenAccess::CreateNew => {
+                o.create_new(true);
+            }
+            _ => (),
+        };
+
+        let name = path.as_ref().to_path_buf();
+        let file = o.open(path)?;
+        let vfs_lock = VfsLock::new();
+        let lock = vfs_lock.conn_lock();
+        Ok(LiteTempDbHandle { name, file, lock })
+    }
+}
+
+impl DatabaseHandle for LiteTempDbHandle {
+    fn size(&self) -> io::Result<u64> {
+        self.file.metadata().map(|m| m.len())
+    }
+
+    fn read_exact_at(&mut self, buf: &mut [u8], offset: u64) -> io::Result<()> {
+        self.file.read_exact_at(buf, offset)
+    }
+
+    fn write_all_at(&mut self, buf: &[u8], offset: u64) -> io::Result<()> {
+        self.file.write_all_at(buf, offset)
+    }
+
+    fn set_len(&mut self, size: u64) -> io::Result<()> {
+        self.file.set_len(size)
+    }
+
+    fn lock(&mut self, lock: LockKind) -> bool {
+        self.lock.acquire(lock)
+    }
+
+    fn reserved(&mut self) -> bool {
+        self.lock.reserved()
+    }
+
+    fn current_lock(&self) -> LockKind {
+        self.lock.state()
+    }
+
+    fn handle_type(&self) -> &'static str {
+        "tempdb"
+    }
+    fn handle_name(&self) -> String {
+        self.name.to_string_lossy().to_string()
     }
 }
