@@ -608,6 +608,10 @@ mod vfs {
         flags: c_int,
         p_res_out: *mut c_int,
     ) -> c_int {
+        if faults::io_error() {
+            return ffi::SQLITE_IOERR_ACCESS;
+        };
+
         let state = match vfs_state::<V>(p_vfs) {
             Ok(state) => state,
             Err(_) => return ffi::SQLITE_ERROR,
@@ -1012,6 +1016,13 @@ mod io {
 
         let data = slice::from_raw_parts(z as *mut u8, i_amt as usize);
         let result = state.file.write_all_at(data, i_ofst as u64);
+        let result = if faults::io_error() {
+            Err(ErrorKind::Other.into())
+        } else if faults::diskfull() {
+            Err(ErrorKind::WriteZero.into())
+        } else {
+            result
+        };
 
         match result {
             Ok(_) => {}
@@ -1999,6 +2010,70 @@ impl std::fmt::Display for RegisterError {
 impl From<std::ffi::NulError> for RegisterError {
     fn from(err: std::ffi::NulError) -> Self {
         Self::Nul(err)
+    }
+}
+
+#[cfg(feature = "faultinj")]
+mod faults {
+    use std::ffi::c_int;
+
+    extern "C" {
+        static mut sqlite3_io_error_hit: c_int;
+        static mut sqlite3_io_error_hardhit: c_int;
+        static mut sqlite3_io_error_pending: c_int;
+        static mut sqlite3_io_error_persist: c_int;
+        static mut sqlite3_io_error_benign: c_int;
+        static mut sqlite3_diskfull_pending: c_int;
+        static mut sqlite3_diskfull: c_int;
+    }
+
+    pub(crate) fn io_error() -> bool {
+        unsafe {
+            let hit = if sqlite3_io_error_persist != 0 && sqlite3_io_error_hit != 0 {
+                true
+            } else {
+                sqlite3_io_error_pending -= 1;
+                sqlite3_io_error_pending == 0
+            };
+            if hit {
+                sqlite3_io_error_hit += 1;
+                if sqlite3_io_error_benign == 0 {
+                    sqlite3_io_error_hardhit += 1;
+                }
+            }
+
+            hit
+        }
+    }
+
+    pub(crate) fn diskfull() -> bool {
+        unsafe {
+            if sqlite3_diskfull_pending != 0 {
+                if sqlite3_diskfull_pending == 1 {
+                    if sqlite3_io_error_benign == 0 {
+                        sqlite3_io_error_hardhit += 1;
+                    };
+                    sqlite3_diskfull = 1;
+                    sqlite3_io_error_hit = 1;
+                    return true;
+                } else {
+                    sqlite3_diskfull_pending -= 1;
+                }
+            }
+        };
+
+        false
+    }
+}
+
+#[cfg(not(feature = "faultinj"))]
+mod faults {
+    pub(crate) fn diskfull() -> bool {
+        false
+    }
+
+    pub(crate) fn io_error() -> bool {
+        false
     }
 }
 

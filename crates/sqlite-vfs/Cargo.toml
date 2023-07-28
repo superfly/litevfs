@@ -21,3 +21,6 @@ syscall = []
 
 # Enable an delegate to parent VFS: `xDlOpen`, `xDlError`, `xDlSym` and `xDlClose`
 loadext = []
+
+# Enable fault injections used by SQLite testsuite
+faultinj = []
