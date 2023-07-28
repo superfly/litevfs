@@ -49,6 +49,7 @@ impl DatabaseManager {
             self.databases
                 .entry(dbname.into())
                 .or_insert(Arc::new(RwLock::new(Database::new(
+                    dbname,
                     self.base_path.join(dbname),
                 )?))),
         );
@@ -65,6 +66,7 @@ impl DatabaseManager {
 pub(crate) struct Database {
     lock: VfsLock,
 
+    name: String,
     path: PathBuf,
     ltx_path: PathBuf,
     page_size: Option<ltx::PageSize>,
@@ -75,7 +77,7 @@ pub(crate) struct Database {
 }
 
 impl Database {
-    fn new(path: PathBuf) -> io::Result<Database> {
+    fn new(name: &str, path: PathBuf) -> io::Result<Database> {
         let dbpath = path.join("db");
         let ltx_path = path.join("ltx"); // TODO: temporary
         fs::create_dir_all(&ltx_path)?;
@@ -97,6 +99,7 @@ impl Database {
 
         Ok(Database {
             lock: VfsLock::new(),
+            name: name.into(),
             path,
             ltx_path,
             page_size,
@@ -130,7 +133,7 @@ impl Database {
     }
 
     pub(crate) fn name(&self) -> String {
-        self.path.to_string_lossy().into_owned()
+        self.name.clone()
     }
 
     pub(crate) fn conn_lock(&self) -> ConnLock {

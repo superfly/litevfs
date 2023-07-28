@@ -42,7 +42,7 @@ impl Vfs for LiteVfs {
             .database_manager
             .lock()
             .unwrap()
-            .get_database(dbname.as_ref(), opts.access)?;
+            .get_database(dbname, opts.access)?;
         let conn_lock = database.read().unwrap().conn_lock();
 
         match opts.kind {
