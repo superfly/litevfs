@@ -38,7 +38,7 @@ pub extern "C" fn sqlite3_litevfs_init(_unused: *const std::ffi::c_char) -> i32 
         LiteVfs::new("/tmp"),
         true,
     ) {
-        Ok(_) => ffi::SQLITE_OK_LOAD_PERMANENTLY,
+        Ok(_) => ffi::SQLITE_OK,
         Err(RegisterError::Nul(_)) => ffi::SQLITE_ERROR,
         Err(RegisterError::Register(code)) => code,
     };

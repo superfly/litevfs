@@ -24,6 +24,11 @@ impl Vfs for LiteVfs {
         log::trace!("[vfs] open: db = {}, opts = {:?}", db, opts);
 
         if !matches!(opts.kind, OpenKind::MainDb | OpenKind::MainJournal) {
+            log::warn!(
+                "[vfs] open: db = {}, opts = {:?}: unsupported open kind",
+                db,
+                opts
+            );
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "unsupported open kind",
