@@ -61,3 +61,11 @@ $ patch -p1 < <litevfs>/misc/testrunner.diff
 ```
 $ ./testfixture test/all.test
 ```
+
+## Test failures
+
+- `ext/recover/*.test` - read more than one page at a time
+- `test/alter{2,3}.test` - directly manipulate DB file
+- `test/attach2.test` - uses Super Journal (multi DB commit)
+- `test/altercol.test` - uses Super Journal
+- `test/backup.test` - does I/O not aligned to a page
