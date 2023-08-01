@@ -209,7 +209,7 @@ impl FilesystemPager {
 
 impl Pager for FilesystemPager {
     fn get_page(&self, state: Option<ltx::Pos>, number: ltx::PageNum) -> io::Result<Page> {
-        log::trace!(
+        log::debug!(
             "[fs-pager] get_page: state = {}, number = {}",
             PosLogger(&state),
             number,
@@ -223,7 +223,7 @@ impl Pager for FilesystemPager {
     }
 
     fn put_page(&self, page: PageRef) -> io::Result<()> {
-        log::trace!("[fs-pager] put_page: number = {}", page.number());
+        log::debug!("[fs-pager] put_page: number = {}", page.number());
 
         let tmp_name = self.root.join(format!("{}.tmp", page.number()));
         let final_name = self.root.join(page.number().to_string());
@@ -234,7 +234,7 @@ impl Pager for FilesystemPager {
     }
 
     fn del_page(&self, number: ltx::PageNum) -> io::Result<()> {
-        log::trace!("[fs-pager] del_page: number = {}", number);
+        log::debug!("[fs-pager] del_page: number = {}", number);
 
         let name = self.root.join(number.to_string());
         match fs::remove_file(name) {
@@ -244,7 +244,7 @@ impl Pager for FilesystemPager {
     }
 
     fn truncate(&self, number: ltx::PageNum) -> io::Result<()> {
-        log::trace!("[fs-pager] truncate: number = {}", number);
+        log::debug!("[fs-pager] truncate: number = {}", number);
 
         let fname: ffi::OsString = number.to_string().into();
 

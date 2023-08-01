@@ -1,4 +1,5 @@
 use crate::{
+    lfsc,
     locks::{ConnLock, VfsLock},
     pager::{FilesystemPager, LoggingPager, PageRef, Pager, ShortReadPager},
 };
@@ -17,14 +18,16 @@ const SQLITE_HEADER_SIZE: usize = 100;
 pub(crate) struct DatabaseManager {
     base_path: PathBuf,
     databases: HashMap<String, Arc<RwLock<Database>>>,
+    client: Arc<lfsc::Client>,
 }
 
 impl DatabaseManager {
-    pub(crate) fn new<P: AsRef<Path>>(base_path: P) -> DatabaseManager {
+    pub(crate) fn new<P: AsRef<Path>>(base_path: P, client: lfsc::Client) -> DatabaseManager {
         DatabaseManager {
             base_path: base_path.as_ref().to_path_buf(),
             // TODO: Populate from LFSC
             databases: HashMap::new(),
+            client: Arc::new(client),
         }
     }
 
@@ -33,33 +36,74 @@ impl DatabaseManager {
         dbname: &str,
         access: OpenAccess,
     ) -> io::Result<Arc<RwLock<Database>>> {
-        match (access, self.database_exists(dbname)?) {
-            (OpenAccess::CreateNew, true) => Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "database exists",
-            )),
-            (OpenAccess::Read | OpenAccess::Write, false) => Err(io::Error::new(
+        if let Some(db) = self.get_database_local(dbname, access)? {
+            return Ok(db);
+        }
+
+        let db = if let Some(db) = self.get_database_remote(dbname, access)? {
+            db
+        } else {
+            return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 "database not found",
-            )),
-            _ => Ok(()),
-        }?;
+            ));
+        };
 
-        let db = Arc::clone(
-            self.databases
-                .entry(dbname.into())
-                .or_insert(Arc::new(RwLock::new(Database::new(
-                    dbname,
-                    self.base_path.join(dbname),
-                )?))),
-        );
+        self.databases.insert(dbname.into(), Arc::clone(&db));
 
         Ok(db)
     }
 
+    fn get_database_local(
+        &self,
+        dbname: &str,
+        access: OpenAccess,
+    ) -> io::Result<Option<Arc<RwLock<Database>>>> {
+        let db = self.databases.get(dbname);
+
+        if db.is_some() && access == OpenAccess::CreateNew {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "database already exists",
+            ));
+        }
+
+        Ok(db.map(Arc::clone))
+    }
+
+    fn get_database_remote(
+        &self,
+        dbname: &str,
+        access: OpenAccess,
+    ) -> io::Result<Option<Arc<RwLock<Database>>>> {
+        let pos = self.client.pos_map()?.remove(dbname);
+
+        if pos.is_some() && access == OpenAccess::CreateNew {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "database already exists",
+            ));
+        };
+
+        if pos.is_none() && matches!(access, OpenAccess::Read | OpenAccess::Write) {
+            return Ok(None);
+        }
+
+        Ok(Some(Arc::new(RwLock::new(Database::new(
+            dbname,
+            self.base_path.join(dbname),
+            pos,
+        )?))))
+    }
+
     pub(crate) fn database_exists<S: AsRef<str>>(&self, dbname: S) -> io::Result<bool> {
-        // TODO: check LFSC
-        Ok(self.databases.contains_key(dbname.as_ref()))
+        if self.databases.contains_key(dbname.as_ref())
+            || self.client.pos_map()?.contains_key(dbname.as_ref())
+        {
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 }
 
@@ -77,18 +121,23 @@ pub(crate) struct Database {
 }
 
 impl Database {
-    fn new(name: &str, path: PathBuf) -> io::Result<Database> {
+    fn new(name: &str, path: PathBuf, pos: Option<ltx::Pos>) -> io::Result<Database> {
         let dbpath = path.join("db");
-        let ltx_path = path.join("ltx"); // TODO: temporary
+        let ltx_path = path.join("ltx");
         fs::create_dir_all(&ltx_path)?;
 
-        let pos = match fs::read(path.join(".pos")) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-            Err(e) => return Err(e),
-            Ok(data) => Some(
-                serde_json::from_slice(&data)
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
-            ),
+        let pos = if pos.is_some() {
+            pos
+        } else {
+            // TODO: temporary until LFSC API is ready
+            match fs::read(path.join(".pos")) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+                Err(e) => return Err(e),
+                Ok(data) => Some(
+                    serde_json::from_slice(&data)
+                        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
+                ),
+            }
         };
         let pager = LoggingPager::new(ShortReadPager::new(FilesystemPager::new(dbpath)?));
         let page_size = match pager.get_page(pos, ltx::PageNum::ONE) {

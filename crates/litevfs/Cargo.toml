@@ -12,8 +12,12 @@ env_logger = "0.10"
 log = "0.4"
 ltx = { git = "ssh://git@github.com/superfly/ltx-rs.git", branch = "main" }
 rand = "0.8"
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sqlite-vfs = { path = "../sqlite-vfs", features = ["syscall", "loadext"] }
+thiserror = "1.0"
+ureq = { version = "2.7", features = ["json"] }
+url = "2.4"
 
 [features]
 linkable = ["sqlite-vfs/faultinj"]

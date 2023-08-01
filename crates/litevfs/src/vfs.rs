@@ -1,5 +1,6 @@
 use crate::{
     database::{Database, DatabaseManager},
+    lfsc,
     locks::{ConnLock, VfsLock},
 };
 use rand::Rng;
@@ -27,7 +28,7 @@ impl Vfs for LiteVfs {
     type Handle = LiteHandle;
 
     fn open(&self, db: &str, opts: OpenOptions) -> io::Result<Self::Handle> {
-        log::trace!("[vfs] open: db = {}, opts = {:?}", db, opts);
+        log::debug!("[vfs] open: db = {}, opts = {:?}", db, opts);
 
         if !matches!(
             opts.kind,
@@ -53,32 +54,26 @@ impl Vfs for LiteVfs {
         };
 
         let res = match kind {
-            OpenKind::MainDb => {
-                let database = self
-                    .database_manager
-                    .lock()
-                    .unwrap()
-                    .get_database(dbname, opts.access)?;
-                let conn_lock = database.read().unwrap().conn_lock();
-
-                Ok(LiteHandle::new(LiteDatabaseHandle::new(
-                    database, conn_lock,
-                )))
-            }
+            OpenKind::MainDb => self
+                .database_manager
+                .lock()
+                .unwrap()
+                .get_database(dbname, opts.access)
+                .map(|database| {
+                    let conn_lock = database.read().unwrap().conn_lock();
+                    LiteHandle::new(LiteDatabaseHandle::new(database, conn_lock))
+                }),
             OpenKind::TempDb => Ok(LiteHandle::new(LiteTempDbHandle::new(
                 self.path.join(db),
                 opts.access,
             )?)),
 
-            OpenKind::MainJournal => {
-                let database = self
-                    .database_manager
-                    .lock()
-                    .unwrap()
-                    .get_database(dbname, opts.access)?;
-
-                Ok(LiteHandle::new(LiteJournalHandle::new(database)?))
-            }
+            OpenKind::MainJournal => self
+                .database_manager
+                .lock()
+                .unwrap()
+                .get_database(dbname, opts.access)
+                .and_then(|database| Ok(LiteHandle::new(LiteJournalHandle::new(database)?))),
             _ => unreachable!(),
         };
 
@@ -90,7 +85,7 @@ impl Vfs for LiteVfs {
     }
 
     fn delete(&self, db: &str) -> io::Result<()> {
-        log::trace!("[vfs] delete: db = {}", db);
+        log::debug!("[vfs] delete: db = {}", db);
 
         let (dbname, kind) = self.database_name_kind(db);
         match kind {
@@ -111,7 +106,7 @@ impl Vfs for LiteVfs {
     }
 
     fn exists(&self, db: &str) -> io::Result<bool> {
-        log::trace!("[vfs] exists: db = {}", db);
+        log::debug!("[vfs] exists: db = {}", db);
 
         let (dbname, kind) = self.database_name_kind(db);
         match kind {
@@ -147,7 +142,7 @@ impl Vfs for LiteVfs {
     }
 
     fn sleep(&self, duration: time::Duration) -> time::Duration {
-        log::trace!("[vfs] sleep: duration: {:?}", duration);
+        log::debug!("[vfs] sleep: duration: {:?}", duration);
 
         // TODO: This will block JS runtime. Should be call back to JS here???
         let now = time::Instant::now();
@@ -157,10 +152,10 @@ impl Vfs for LiteVfs {
 }
 
 impl LiteVfs {
-    pub fn new<P: AsRef<Path>>(path: P) -> Self {
+    pub(crate) fn new<P: AsRef<Path>>(path: P, client: lfsc::Client) -> Self {
         LiteVfs {
             path: path.as_ref().to_path_buf(),
-            database_manager: Mutex::new(DatabaseManager::new(path)),
+            database_manager: Mutex::new(DatabaseManager::new(path, client)),
             temp_counter: AtomicU64::new(0),
         }
     }
