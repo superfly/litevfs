@@ -52,7 +52,7 @@ impl Vfs for LiteVfs {
             ));
         };
 
-        match kind {
+        let res = match kind {
             OpenKind::MainDb => {
                 let database = self
                     .database_manager
@@ -80,7 +80,13 @@ impl Vfs for LiteVfs {
                 Ok(LiteHandle::new(LiteJournalHandle::new(database)?))
             }
             _ => unreachable!(),
+        };
+
+        if let Err(ref err) = res {
+            log::warn!("[vfs] open: db = {}, opts = {:?}: {:?}", db, opts, err,);
         }
+
+        res
     }
 
     fn delete(&self, db: &str) -> io::Result<()> {

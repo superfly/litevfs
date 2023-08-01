@@ -1,6 +1,6 @@
 use crate::{
     locks::{ConnLock, VfsLock},
-    pager::{FilesystemPager, PageRef, Pager, ShortReadPager},
+    pager::{FilesystemPager, LoggingPager, PageRef, Pager, ShortReadPager},
 };
 use sqlite_vfs::OpenAccess;
 use std::{
@@ -72,7 +72,7 @@ pub(crate) struct Database {
     page_size: Option<ltx::PageSize>,
     pos: Option<ltx::Pos>,
 
-    pager: ShortReadPager<FilesystemPager>,
+    pager: Box<dyn Pager + Send>,
     dirty_pages: BTreeMap<ltx::PageNum, Option<ltx::Checksum>>,
 }
 
@@ -90,7 +90,7 @@ impl Database {
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
             ),
         };
-        let pager = ShortReadPager::new(FilesystemPager::new(dbpath)?);
+        let pager = LoggingPager::new(ShortReadPager::new(FilesystemPager::new(dbpath)?));
         let page_size = match pager.get_page(pos, ltx::PageNum::ONE) {
             Ok(page) => Some(Database::parse_page_size_database(page.as_ref())?),
             Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => None,
@@ -104,7 +104,7 @@ impl Database {
             ltx_path,
             page_size,
             pos,
-            pager,
+            pager: Box::new(pager),
             dirty_pages: BTreeMap::new(),
         })
     }
@@ -148,6 +148,7 @@ impl Database {
         self.page_size
             .ok_or(io::Error::new(io::ErrorKind::Other, "page size unknown"))
     }
+
     pub(crate) fn set_page_size(&mut self, ps: ltx::PageSize) {
         self.page_size = Some(ps)
     }
@@ -257,16 +258,46 @@ impl Database {
             return Ok(());
         };
 
-        let page1 = self.pager.get_page(self.pos, ltx::PageNum::ONE)?;
-        let commit = ltx::PageNum::new(u32::from_be_bytes(
-            page1.as_ref()[28..32].try_into().unwrap(),
-        ))?;
-
         let txid = if let Some(pos) = self.pos {
             pos.txid + 1
         } else {
             ltx::TXID::ONE
         };
+
+        let checksum = match self.commit_journal_inner(txid) {
+            Ok(checksum) => checksum,
+            Err(err) => {
+                for &page_num in self.dirty_pages.keys() {
+                    self.pager.del_page(page_num)?;
+                }
+                self.dirty_pages.clear();
+
+                return Err(err);
+            }
+        };
+
+        self.dirty_pages.clear();
+        let pos = ltx::Pos {
+            txid,
+            post_apply_checksum: checksum,
+        };
+
+        // TODO: temporary
+        fs::write(
+            self.path.join(".pos"),
+            serde_json::to_vec_pretty(&pos).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
+        )?;
+
+        self.pos = Some(pos);
+
+        Ok(())
+    }
+
+    fn commit_journal_inner(&mut self, txid: ltx::TXID) -> io::Result<ltx::Checksum> {
+        let page1 = self.pager.get_page(self.pos, ltx::PageNum::ONE)?;
+        let commit = ltx::PageNum::new(u32::from_be_bytes(
+            page1.as_ref()[28..32].try_into().unwrap(),
+        ))?;
 
         let file = fs::File::create(self.ltx_path.join(format!("{0}-{0}.ltx", txid)))?;
         let mut enc = ltx::Encoder::new(
@@ -286,6 +317,7 @@ impl Database {
             .pos
             .map(|p| p.post_apply_checksum.into_inner())
             .unwrap_or(0);
+        let mut pages = Vec::with_capacity(self.dirty_pages.len());
         for (&page_num, &prev_checksum) in self.dirty_pages.iter().filter(|&(&n, _)| n <= commit) {
             let page = self.pager.get_page(self.pos, page_num)?;
             if let Some(prev_checksum) = prev_checksum {
@@ -293,26 +325,12 @@ impl Database {
             };
             checksum ^= page.checksum().into_inner();
             enc.encode_page(page_num, page.as_ref())?;
+            pages.push(page_num);
         }
 
         let checksum = ltx::Checksum::new(checksum);
         enc.finish(checksum)?;
-        file.sync_all()?;
 
-        self.dirty_pages.clear();
-        let pos = ltx::Pos {
-            txid,
-            post_apply_checksum: checksum,
-        };
-
-        // TODO: temporary
-        fs::write(
-            self.path.join(".pos"),
-            serde_json::to_vec_pretty(&pos).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
-        )?;
-
-        self.pos = Some(pos);
-
-        Ok(())
+        Ok(checksum)
     }
 }
