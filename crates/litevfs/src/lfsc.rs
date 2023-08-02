@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose, Engine};
 use std::{collections::HashMap, env, fmt, io, sync};
 
 /// All possible errors returned by the LFSC client.
@@ -72,6 +73,37 @@ pub(crate) struct Client {
     instance_id: sync::RwLock<Option<String>>,
 }
 
+/// A single database page fetched from LFSC.
+#[derive(Debug, PartialEq, serde::Deserialize)]
+pub(crate) struct Page {
+    #[serde(deserialize_with = "deserialize_page")]
+    data: Vec<u8>,
+    #[serde(rename = "pgno")]
+    number: ltx::PageNum,
+}
+
+fn deserialize_page<'de, D>(de: D) -> std::result::Result<Vec<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let encoded: &str = serde::Deserialize::deserialize(de)?;
+    general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(serde::de::Error::custom)
+}
+
+impl Page {
+    /// Get the page number.
+    pub(crate) fn number(&self) -> ltx::PageNum {
+        self.number
+    }
+
+    /// Consume the page and return the underlying buffer.
+    pub(crate) fn into_inner(self) -> Vec<u8> {
+        self.data
+    }
+}
+
 impl Client {
     pub(crate) fn builder() -> ClientBuilder {
         ClientBuilder::default()
@@ -126,6 +158,37 @@ impl Client {
         io::copy(&mut resp.into_reader(), &mut io::sink()).ok();
 
         Ok(())
+    }
+
+    pub(crate) fn get_page(
+        &self,
+        db: &str,
+        pos: ltx::Pos,
+        number: ltx::PageNum,
+    ) -> Result<Vec<Page>> {
+        log::debug!(
+            "[lfsc] get_page: db = {}, pos = {}, number = {}",
+            db,
+            pos,
+            number
+        );
+
+        #[derive(serde::Deserialize)]
+        struct GetPageResponse {
+            pages: Vec<Page>,
+        }
+
+        let mut u = self.host.clone();
+        u.set_path("/db/page");
+        u.query_pairs_mut()
+            .append_pair("db", db)
+            .append_pair("pos", &pos.to_string())
+            .append_pair("pgno", &number.to_string());
+
+        let req = self.make_request("GET", u);
+        let resp = self.process_response(req.call())?;
+
+        Ok(resp.into_json::<GetPageResponse>()?.pages)
     }
 
     fn make_request(&self, method: &str, mut u: url::Url) -> ureq::Request {
@@ -208,5 +271,34 @@ impl ClientBuilder {
             cluster: self.cluster,
             instance_id: sync::RwLock::new(None),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Page;
+    use serde_test::{assert_de_tokens, Token};
+
+    #[test]
+    fn page_de() {
+        let page = Page {
+            data: vec![1, 2, 3, 4, 5, 6],
+            number: ltx::PageNum::new(123).unwrap(),
+        };
+
+        assert_de_tokens(
+            &page,
+            &[
+                Token::Struct {
+                    name: "Page",
+                    len: 2,
+                },
+                Token::Str("pgno"),
+                Token::U32(123),
+                Token::Str("data"),
+                Token::BorrowedStr("AQIDBAUG"),
+                Token::StructEnd,
+            ],
+        );
     }
 }

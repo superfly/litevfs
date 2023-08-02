@@ -215,7 +215,7 @@ impl Pager for FilesystemPager {
             number,
         );
 
-        let mut file = fs::File::open(self.root.join(number.to_string()))?;
+        let mut file = fs::File::open(self.root.join(number.file_name()))?;
         let mut buf = Vec::new();
         file.read_to_end(&mut buf)?;
 
@@ -226,7 +226,7 @@ impl Pager for FilesystemPager {
         log::debug!("[fs-pager] put_page: number = {}", page.number());
 
         let tmp_name = self.root.join(format!("{}.tmp", page.number()));
-        let final_name = self.root.join(page.number().to_string());
+        let final_name = self.root.join(page.number().file_name());
 
         let mut file = fs::File::create(&tmp_name)?;
         file.write_all(page.as_ref())?;
@@ -236,7 +236,7 @@ impl Pager for FilesystemPager {
     fn del_page(&self, number: ltx::PageNum) -> io::Result<()> {
         log::debug!("[fs-pager] del_page: number = {}", number);
 
-        let name = self.root.join(number.to_string());
+        let name = self.root.join(number.file_name());
         match fs::remove_file(name) {
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
             x => x,
@@ -246,7 +246,7 @@ impl Pager for FilesystemPager {
     fn truncate(&self, number: ltx::PageNum) -> io::Result<()> {
         log::debug!("[fs-pager] truncate: number = {}", number);
 
-        let fname: ffi::OsString = number.to_string().into();
+        let fname: ffi::OsString = number.file_name().into();
 
         for entry in fs::read_dir(&self.root)? {
             let entry = entry?;
