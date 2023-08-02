@@ -7,7 +7,7 @@ use sqlite_vfs::OpenAccess;
 use std::{
     collections::{BTreeMap, HashMap},
     fs,
-    io::{self, Read},
+    io::{self, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
     time,
@@ -25,7 +25,6 @@ impl DatabaseManager {
     pub(crate) fn new<P: AsRef<Path>>(base_path: P, client: lfsc::Client) -> DatabaseManager {
         DatabaseManager {
             base_path: base_path.as_ref().to_path_buf(),
-            // TODO: Populate from LFSC
             databases: HashMap::new(),
             client: Arc::new(client),
         }
@@ -93,6 +92,7 @@ impl DatabaseManager {
             dbname,
             self.base_path.join(dbname),
             pos,
+            Arc::clone(&self.client),
         )?))))
     }
 
@@ -109,6 +109,7 @@ impl DatabaseManager {
 
 pub(crate) struct Database {
     lock: VfsLock,
+    client: Arc<lfsc::Client>,
 
     name: String,
     path: PathBuf,
@@ -121,24 +122,16 @@ pub(crate) struct Database {
 }
 
 impl Database {
-    fn new(name: &str, path: PathBuf, pos: Option<ltx::Pos>) -> io::Result<Database> {
+    fn new(
+        name: &str,
+        path: PathBuf,
+        pos: Option<ltx::Pos>,
+        client: Arc<lfsc::Client>,
+    ) -> io::Result<Database> {
         let dbpath = path.join("db");
         let ltx_path = path.join("ltx");
         fs::create_dir_all(&ltx_path)?;
 
-        let pos = if pos.is_some() {
-            pos
-        } else {
-            // TODO: temporary until LFSC API is ready
-            match fs::read(path.join(".pos")) {
-                Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-                Err(e) => return Err(e),
-                Ok(data) => Some(
-                    serde_json::from_slice(&data)
-                        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
-                ),
-            }
-        };
         let pager = LoggingPager::new(ShortReadPager::new(FilesystemPager::new(dbpath)?));
         let page_size = match pager.get_page(pos, ltx::PageNum::ONE) {
             Ok(page) => Some(Database::parse_page_size_database(page.as_ref())?),
@@ -148,6 +141,7 @@ impl Database {
 
         Ok(Database {
             lock: VfsLock::new(),
+            client,
             name: name.into(),
             path,
             ltx_path,
@@ -316,6 +310,8 @@ impl Database {
         let checksum = match self.commit_journal_inner(txid) {
             Ok(checksum) => checksum,
             Err(err) => {
+                // Commit failed, remove the dirty pages so they can
+                // be refetched from LFSC
                 for &page_num in self.dirty_pages.keys() {
                     self.pager.del_page(page_num)?;
                 }
@@ -331,12 +327,6 @@ impl Database {
             post_apply_checksum: checksum,
         };
 
-        // TODO: temporary
-        fs::write(
-            self.path.join(".pos"),
-            serde_json::to_vec_pretty(&pos).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
-        )?;
-
         self.pos = Some(pos);
 
         Ok(())
@@ -348,7 +338,13 @@ impl Database {
             page1.as_ref()[28..32].try_into().unwrap(),
         ))?;
 
-        let file = fs::File::create(self.ltx_path.join(format!("{0}-{0}.ltx", txid)))?;
+        let ltx_path = self.ltx_path.join(format!("{0}-{0}.ltx", txid));
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&ltx_path)?;
         let mut enc = ltx::Encoder::new(
             &file,
             &ltx::Header {
@@ -379,6 +375,12 @@ impl Database {
 
         let checksum = ltx::Checksum::new(checksum);
         enc.finish(checksum)?;
+
+        // rewind the file and send it to LFSC
+        file.seek(SeekFrom::Start(0))?;
+        self.client
+            .write_tx(&self.name, &file, file.metadata()?.len())?;
+        fs::remove_file(&ltx_path)?;
 
         Ok(checksum)
     }

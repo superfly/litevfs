@@ -110,6 +110,24 @@ impl Client {
         Ok(resp.into_json()?)
     }
 
+    pub(crate) fn write_tx(&self, db: &str, ltx: impl io::Read, ltx_len: u64) -> Result<()> {
+        log::debug!("[lfsc] write_tx: db = {}", db);
+
+        let mut u = self.host.clone();
+        u.set_path("/db/tx");
+        u.query_pairs_mut().append_pair("db", db);
+
+        let req = self
+            .make_request("POST", u)
+            .set("Content-Length", &ltx_len.to_string());
+        let resp = self.process_response(req.send(ltx))?;
+
+        // consume the body (and ignore any errors) to reuse the connection
+        io::copy(&mut resp.into_reader(), &mut io::sink()).ok();
+
+        Ok(())
+    }
+
     fn make_request(&self, method: &str, mut u: url::Url) -> ureq::Request {
         if let Some(ref cluster) = self.cluster {
             u.query_pairs_mut().append_pair("cluster", cluster);
