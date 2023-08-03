@@ -1,17 +1,25 @@
 use crate::lfsc;
+use caches::{Cache, SegmentedCache};
 use ltx::PageChecksum;
 use std::{
     ffi, fmt, fs,
     io::{self, Read, Write},
-    path::{self, Path},
-    sync::Arc,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
 };
+use string_interner::{DefaultSymbol, StringInterner};
 
 /// [Pager] manages SQLite page data. It uses local filesystem to cache
 /// the pages and when the pages are absent in the cache, requests them from LFSC.
 pub(crate) struct Pager {
-    root: path::PathBuf,
+    root: PathBuf,
     client: Arc<lfsc::Client>,
+
+    interner: Mutex<StringInterner>,
+    lru: Mutex<SegmentedCache<PageCacheKey, ()>>,
+
+    min_available_space: u64,
+    max_stored_pages: Option<usize>,
 }
 
 impl Pager {
@@ -19,11 +27,24 @@ impl Pager {
         Pager {
             root: path.as_ref().to_path_buf(),
             client,
+
+            interner: Mutex::new(StringInterner::new()),
+            // The size is chosen from:
+            //  - 128Mb of space
+            //  - 4k page size
+            // In reality is doesn't matter as we are gonna check available
+            // FS space anyway. But we need some predetermined size as
+            // the cache is not resizable.
+            lru: Mutex::new(SegmentedCache::new(6500, 26000).unwrap()),
+
+            // TODO: make configurable
+            min_available_space: 10 * 1024 * 1024,
+            max_stored_pages: None,
         }
     }
 
     /// Returns a base path for the given `db`.
-    pub(crate) fn db_path(&self, db: &str) -> path::PathBuf {
+    pub(crate) fn db_path(&self, db: &str) -> PathBuf {
         self.root.join(db)
     }
 
@@ -142,9 +163,12 @@ impl Pager {
         _pos: Option<ltx::Pos>,
         pgno: ltx::PageNum,
     ) -> io::Result<Page> {
-        let mut file = fs::File::open(self.pages_path(db).join(pgno.file_name()))?;
+        let mut file = fs::File::open(self.pages_path(db).join(PathBuf::from(pgno)))?;
         let mut buf = Vec::new();
         file.read_to_end(&mut buf)?;
+
+        // Mark the page as recently accessed
+        self.lru.lock().unwrap().get(&self.cache_key(db, pgno));
 
         Ok(Page::new(pgno, buf))
     }
@@ -175,8 +199,7 @@ impl Pager {
                 data: page.as_ref(),
                 number: page.number(),
             };
-            self.del_page(db, page_ref.number())?;
-            self.put_page(db, page_ref)?;
+            self.put_page_inner(db, page_ref)?;
 
             if page.number() == pgno {
                 requested_page = Some(Page::new(page.number(), page.into_inner()))
@@ -187,24 +210,34 @@ impl Pager {
     }
 
     fn put_page_inner(&self, db: &str, page: PageRef) -> io::Result<()> {
-        let tmp_name = self.tmp_path(db).join(page.number().file_name());
-        let final_name = self.pages_path(db).join(page.number().file_name());
+        let tmp_name = self.tmp_path(db).join(PathBuf::from(page.number()));
+        let final_name = self.pages_path(db).join(PathBuf::from(page.number()));
+
+        self.reclaim_space()?;
 
         let mut file = fs::File::create(&tmp_name)?;
         file.write_all(page.as_ref())?;
-        fs::rename(tmp_name, final_name)
+        fs::rename(tmp_name, final_name)?;
+
+        self.lru
+            .lock()
+            .unwrap()
+            .put(self.cache_key(db, page.number()), ());
+
+        Ok(())
     }
 
     fn del_page_inner(&self, db: &str, pgno: ltx::PageNum) -> io::Result<()> {
-        let name = self.pages_path(db).join(pgno.file_name());
-        match fs::remove_file(name) {
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-            x => x,
-        }
+        let name = self.pages_path(db).join(PathBuf::from(pgno));
+        remove_file(name)?;
+
+        self.lru.lock().unwrap().remove(&self.cache_key(db, pgno));
+
+        Ok(())
     }
 
     fn truncate_inner(&self, db: &str, pgno: ltx::PageNum) -> io::Result<()> {
-        let fname: ffi::OsString = pgno.file_name().into();
+        let fname: ffi::OsString = PathBuf::from(pgno).into();
 
         for entry in fs::read_dir(&self.pages_path(db))? {
             let entry = entry?;
@@ -212,18 +245,75 @@ impl Pager {
                 continue;
             }
 
-            fs::remove_file(entry.path())?;
+            remove_file(entry.path())?;
+
+            let rpgno = ltx::PageNum::try_from(Path::new(&entry.file_name()))?;
+            self.lru.lock().unwrap().remove(&self.cache_key(db, rpgno));
         }
 
         Ok(())
     }
 
-    fn pages_path(&self, db: &str) -> path::PathBuf {
+    fn pages_path(&self, db: &str) -> PathBuf {
         self.db_path(db).join("pages")
     }
 
-    fn tmp_path(&self, db: &str) -> path::PathBuf {
+    fn tmp_path(&self, db: &str) -> PathBuf {
         self.db_path(db).join("tmp")
+    }
+
+    fn cache_key(&self, db: &str, pgno: ltx::PageNum) -> PageCacheKey {
+        PageCacheKey {
+            dbsym: self.interner.lock().unwrap().get_or_intern(db),
+            pgno,
+        }
+    }
+
+    fn reclaim_space(&self) -> io::Result<()> {
+        loop {
+            let pages = self.lru.lock().unwrap().len();
+            let space = fs2::available_space(&self.root)?;
+
+            log::trace!(
+                "[pager] reclaim_space: pages = {}, space = {}",
+                pages,
+                space
+            );
+
+            if pages == 0
+                || space >= self.min_available_space
+                || Some(pages) <= self.max_stored_pages
+            {
+                return Ok(());
+            }
+
+            self.remove_lru_page()?;
+        }
+    }
+
+    fn remove_lru_page(&self) -> io::Result<()> {
+        let cache_key = {
+            let mut lru = self.lru.lock().unwrap();
+
+            if let Some((cache_key, _)) = lru.remove_lru_from_probationary() {
+                cache_key
+            } else if let Some((cache_key, _)) = lru.remove_lru_from_protected() {
+                cache_key
+            } else {
+                return Ok(());
+            }
+        };
+
+        if let Some(db) = self.interner.lock().unwrap().resolve(cache_key.dbsym) {
+            log::trace!(
+                "[pager] remove_lru_page: db = {}, pgno = {}",
+                db,
+                cache_key.pgno
+            );
+            remove_file(self.pages_path(db).join(PathBuf::from(cache_key.pgno)))?;
+        }
+
+        Ok(())
     }
 }
 
@@ -296,5 +386,18 @@ impl<'a> fmt::Display for PosLogger<'a> {
         } else {
             write!(f, "<unknown>")
         }
+    }
+}
+
+#[derive(PartialEq, Eq, Hash)]
+struct PageCacheKey {
+    dbsym: DefaultSymbol,
+    pgno: ltx::PageNum,
+}
+
+fn remove_file<P: AsRef<Path>>(file: P) -> io::Result<()> {
+    match fs::remove_file(file) {
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        x => x,
     }
 }
