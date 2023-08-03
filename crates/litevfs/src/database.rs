@@ -16,17 +16,19 @@ use std::{
 const SQLITE_HEADER_SIZE: usize = 100;
 
 pub(crate) struct DatabaseManager {
-    base_path: PathBuf,
+    pager: Arc<Pager>,
     databases: HashMap<String, Arc<RwLock<Database>>>,
     client: Arc<lfsc::Client>,
 }
 
 impl DatabaseManager {
     pub(crate) fn new<P: AsRef<Path>>(base_path: P, client: lfsc::Client) -> DatabaseManager {
+        let client = Arc::new(client);
+
         DatabaseManager {
-            base_path: base_path.as_ref().to_path_buf(),
+            pager: Arc::new(Pager::new(base_path, Arc::clone(&client))),
             databases: HashMap::new(),
-            client: Arc::new(client),
+            client: Arc::clone(&client),
         }
     }
 
@@ -90,8 +92,8 @@ impl DatabaseManager {
 
         Ok(Some(Arc::new(RwLock::new(Database::new(
             dbname,
-            self.base_path.join(dbname),
             pos,
+            Arc::clone(&self.pager),
             Arc::clone(&self.client),
         )?))))
     }
@@ -109,31 +111,30 @@ impl DatabaseManager {
 
 pub(crate) struct Database {
     lock: VfsLock,
-    client: Arc<lfsc::Client>,
-
     name: String,
-    path: PathBuf,
+    client: Arc<lfsc::Client>,
+    pager: Arc<Pager>,
     ltx_path: PathBuf,
+    journal_path: PathBuf,
     page_size: Option<ltx::PageSize>,
     pos: Option<ltx::Pos>,
-
-    pager: Pager,
     dirty_pages: BTreeMap<ltx::PageNum, Option<ltx::Checksum>>,
 }
 
 impl Database {
     fn new(
         name: &str,
-        path: PathBuf,
         pos: Option<ltx::Pos>,
+        pager: Arc<Pager>,
         client: Arc<lfsc::Client>,
     ) -> io::Result<Database> {
-        let dbpath = path.join("db");
-        let ltx_path = path.join("ltx");
+        let ltx_path = pager.db_path(name).join("ltx");
+        let journal_path = pager.db_path(name).join("journal");
+
+        pager.prepare_db(name)?;
         fs::create_dir_all(&ltx_path)?;
 
-        let pager = Pager::new(name, dbpath, Arc::clone(&client))?;
-        let page_size = match pager.get_page(pos, ltx::PageNum::ONE) {
+        let page_size = match pager.get_page(name, pos, ltx::PageNum::ONE) {
             Ok(page) => Some(Database::parse_page_size_database(page.as_ref())?),
             Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => None,
             Err(err) => return Err(err),
@@ -141,13 +142,13 @@ impl Database {
 
         Ok(Database {
             lock: VfsLock::new(),
-            client,
             name: name.into(),
-            path,
+            client,
+            pager,
             ltx_path,
+            journal_path,
             page_size,
             pos,
-            pager,
             dirty_pages: BTreeMap::new(),
         })
     }
@@ -183,8 +184,8 @@ impl Database {
         self.lock.conn_lock()
     }
 
-    pub(crate) fn journal_path(&self) -> PathBuf {
-        self.path.join("journal")
+    pub(crate) fn journal_path(&self) -> &Path {
+        self.journal_path.as_path()
     }
 
     pub(crate) fn page_size(&self) -> io::Result<ltx::PageSize> {
@@ -224,7 +225,7 @@ impl Database {
     }
 
     pub(crate) fn size(&self) -> io::Result<u64> {
-        let page1 = match self.pager.get_page(self.pos, ltx::PageNum::ONE) {
+        let page1 = match self.pager.get_page(&self.name, self.pos, ltx::PageNum::ONE) {
             Ok(page1) => page1,
             Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => return Ok(0),
             Err(err) => return Err(err),
@@ -242,7 +243,7 @@ impl Database {
             (self.page_num_for(offset)?, 0)
         };
 
-        let page = self.pager.get_page(self.pos, number)?;
+        let page = self.pager.get_page(&self.name, self.pos, number)?;
         buf.copy_from_slice(&page.as_ref()[offset..offset + buf.len()]);
 
         Ok(())
@@ -255,14 +256,14 @@ impl Database {
 
         self.ensure_aligned(buf, offset)?;
         let page_num = self.page_num_for(offset)?;
-        let current_checksum = match self.pager.get_page(self.pos, page_num) {
+        let current_checksum = match self.pager.get_page(&self.name, self.pos, page_num) {
             Ok(page) => Some(page.checksum()),
             Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => None,
             Err(err) => return Err(err),
         };
 
         let page = PageRef::new(page_num, buf);
-        self.pager.put_page(page)?;
+        self.pager.put_page(&self.name, page)?;
 
         self.dirty_pages
             .entry(page.number())
@@ -282,7 +283,7 @@ impl Database {
         }
 
         self.pager
-            .truncate(ltx::PageNum::new((size / page_size) as u32)?)
+            .truncate(&self.name, ltx::PageNum::new((size / page_size) as u32)?)
     }
 
     fn is_journal_header_valid(&self) -> io::Result<bool> {
@@ -313,7 +314,7 @@ impl Database {
                 // Commit failed, remove the dirty pages so they can
                 // be refetched from LFSC
                 for &page_num in self.dirty_pages.keys() {
-                    self.pager.del_page(page_num)?;
+                    self.pager.del_page(&self.name, page_num)?;
                 }
                 self.dirty_pages.clear();
 
@@ -333,7 +334,9 @@ impl Database {
     }
 
     fn commit_journal_inner(&mut self, txid: ltx::TXID) -> io::Result<ltx::Checksum> {
-        let page1 = self.pager.get_page(self.pos, ltx::PageNum::ONE)?;
+        let page1 = self
+            .pager
+            .get_page(&self.name, self.pos, ltx::PageNum::ONE)?;
         let commit = ltx::PageNum::new(u32::from_be_bytes(
             page1.as_ref()[28..32].try_into().unwrap(),
         ))?;
@@ -364,7 +367,7 @@ impl Database {
             .unwrap_or(0);
         let mut pages = Vec::with_capacity(self.dirty_pages.len());
         for (&page_num, &prev_checksum) in self.dirty_pages.iter().filter(|&(&n, _)| n <= commit) {
-            let page = self.pager.get_page(self.pos, page_num)?;
+            let page = self.pager.get_page(&self.name, self.pos, page_num)?;
             if let Some(prev_checksum) = prev_checksum {
                 checksum ^= prev_checksum.into_inner();
             };

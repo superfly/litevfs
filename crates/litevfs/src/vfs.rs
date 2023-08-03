@@ -121,7 +121,8 @@ impl Vfs for LiteVfs {
                     .lock()
                     .unwrap()
                     .get_database(dbname.as_ref(), OpenAccess::Write)?;
-                let journal = database.read().unwrap().journal_path();
+                let database = database.read().unwrap();
+                let journal = database.journal_path();
 
                 Ok(journal.exists())
             }
