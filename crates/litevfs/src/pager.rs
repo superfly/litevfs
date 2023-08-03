@@ -1,3 +1,4 @@
+use crate::lfsc;
 use ltx::PageChecksum;
 use std::{
     ffi, fmt, fs,
@@ -194,16 +195,58 @@ impl<P: Pager> Pager for ShortReadPager<P> {
 /// It assumes that it always works with the up-to-date database states
 /// and cannot fetch pages at particular state.
 pub(crate) struct FilesystemPager {
+    db: String,
     root: path::PathBuf,
+    client: Arc<lfsc::Client>,
 }
 
 impl FilesystemPager {
-    pub(crate) fn new<P: AsRef<Path>>(path: P) -> io::Result<FilesystemPager> {
+    pub(crate) fn new<P: AsRef<Path>>(
+        db: &str,
+        path: P,
+        client: Arc<lfsc::Client>,
+    ) -> io::Result<FilesystemPager> {
         fs::create_dir_all(path.as_ref())?;
 
         Ok(FilesystemPager {
+            db: db.into(),
             root: path.as_ref().to_path_buf(),
+            client,
         })
+    }
+
+    fn get_page_local(&self, _state: Option<ltx::Pos>, number: ltx::PageNum) -> io::Result<Page> {
+        let mut file = fs::File::open(self.root.join(number.file_name()))?;
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf)?;
+
+        Ok(Page::new(number, buf))
+    }
+
+    fn get_page_remote(&self, state: Option<ltx::Pos>, number: ltx::PageNum) -> io::Result<Page> {
+        let pos = if let Some(pos) = state {
+            pos
+        } else {
+            return Err(io::ErrorKind::NotFound.into());
+        };
+
+        let pages = self.client.get_page(&self.db, pos, number)?;
+
+        let mut requested_page: Option<Page> = None;
+        for page in pages {
+            let page_ref = PageRef {
+                data: page.as_ref(),
+                number: page.number(),
+            };
+            self.del_page(number)?;
+            self.put_page(page_ref)?;
+
+            if page.number() == number {
+                requested_page = Some(Page::new(page.number(), page.into_inner()))
+            }
+        }
+
+        requested_page.ok_or(io::ErrorKind::NotFound.into())
     }
 }
 
@@ -215,11 +258,13 @@ impl Pager for FilesystemPager {
             number,
         );
 
-        let mut file = fs::File::open(self.root.join(number.file_name()))?;
-        let mut buf = Vec::new();
-        file.read_to_end(&mut buf)?;
+        match self.get_page_local(state, number) {
+            Ok(page) => return Ok(page),
+            Err(err) if err.kind() != io::ErrorKind::NotFound => return Err(err),
+            _ => (),
+        };
 
-        Ok(Page::new(number, buf))
+        self.get_page_remote(state, number)
     }
 
     fn put_page(&self, page: PageRef) -> io::Result<()> {

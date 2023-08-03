@@ -132,7 +132,11 @@ impl Database {
         let ltx_path = path.join("ltx");
         fs::create_dir_all(&ltx_path)?;
 
-        let pager = LoggingPager::new(ShortReadPager::new(FilesystemPager::new(dbpath)?));
+        let pager = LoggingPager::new(ShortReadPager::new(FilesystemPager::new(
+            name,
+            dbpath,
+            Arc::clone(&client),
+        )?));
         let page_size = match pager.get_page(pos, ltx::PageNum::ONE) {
             Ok(page) => Some(Database::parse_page_size_database(page.as_ref())?),
             Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => None,

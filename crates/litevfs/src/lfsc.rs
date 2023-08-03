@@ -104,6 +104,12 @@ impl Page {
     }
 }
 
+impl AsRef<[u8]> for Page {
+    fn as_ref(&self) -> &[u8] {
+        &self.data
+    }
+}
+
 impl Client {
     pub(crate) fn builder() -> ClientBuilder {
         ClientBuilder::default()
