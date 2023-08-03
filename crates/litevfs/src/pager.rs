@@ -7,27 +7,189 @@ use std::{
     sync::Arc,
 };
 
-/// Trait for reading and writing SQLite pages from/to external storage.
-pub(crate) trait Pager: Sync {
-    /// Returns a database `page` at the given database `state`.
-    fn get_page(&self, state: Option<ltx::Pos>, number: ltx::PageNum) -> io::Result<Page>;
+/// [Pager] manages SQLite page data. It uses local filesystem to cache
+/// the pages and when the pages are absent in the cache, requests them from LFSC.
+pub(crate) struct Pager {
+    db: String,
+    root: path::PathBuf,
+    client: Arc<lfsc::Client>,
+}
 
-    /// Stores the database `page`.
-    fn put_page(&self, page: PageRef) -> io::Result<()>;
+impl Pager {
+    pub(crate) fn new<P: AsRef<Path>>(
+        db: &str,
+        path: P,
+        client: Arc<lfsc::Client>,
+    ) -> io::Result<Pager> {
+        fs::create_dir_all(path.as_ref())?;
 
-    /// Deletes the database page indentified by `number`.
-    fn del_page(&self, number: ltx::PageNum) -> io::Result<()>;
+        Ok(Pager {
+            db: db.into(),
+            root: path.as_ref().to_path_buf(),
+            client,
+        })
+    }
 
-    /// Removes all database pages after `number`.
-    fn truncate(&self, number: ltx::PageNum) -> io::Result<()>;
+    /// Returns a database `page` at the given database `pos`.
+    pub(crate) fn get_page(&self, pos: Option<ltx::Pos>, pgno: ltx::PageNum) -> io::Result<Page> {
+        log::debug!(
+            "[pager] get_page: pos = {}, pgno = {}",
+            PosLogger(&pos),
+            pgno,
+        );
+
+        // Request the page either from local cache or from LFSC and convert
+        // io::ErrorKind::NotFound errors to io::ErrorKind::UnexpectedEof, as
+        // this is what local IO will return in case we read past the file.
+        let r = match self.get_page_inner(pos, pgno) {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                Err(io::ErrorKind::UnexpectedEof.into())
+            }
+            x => x,
+        };
+
+        // Log the error, if any
+        match r {
+            Err(err) => {
+                log::warn!(
+                    "[pager] get_page: pos = {}, pgno = {}: {:?}",
+                    PosLogger(&pos),
+                    pgno,
+                    err
+                );
+                Err(err)
+            }
+            x => x,
+        }
+    }
+
+    /// Writes page into the local cache. The page is not shipped to LFSC until the
+    /// database is committed.
+    pub(crate) fn put_page(&self, page: PageRef) -> io::Result<()> {
+        log::debug!("[pager] put_page: pgno = {}", page.number());
+
+        match self.put_page_inner(page) {
+            Err(err) => {
+                log::warn!("[pager] put_page: pgno = {}: {:?}", page.number(), err,);
+                Err(err)
+            }
+            x => x,
+        }
+    }
+
+    /// Deletes the page from the local cache. It's fine to attempt to delete an non-existing
+    /// page.
+    pub(crate) fn del_page(&self, pgno: ltx::PageNum) -> io::Result<()> {
+        log::debug!("[pager] del_page: pgno = {}", pgno);
+
+        match self.del_page_inner(pgno) {
+            Err(err) => {
+                log::warn!("[pager] del_page: pgno = {}: {:?}", pgno, err);
+                Err(err)
+            }
+            x => x,
+        }
+    }
+
+    /// Removes all pages past the provided `pgno`.
+    pub(crate) fn truncate(&self, pgno: ltx::PageNum) -> io::Result<()> {
+        log::debug!("[pager] truncate: pgno = {}", pgno);
+
+        match self.truncate_inner(pgno) {
+            Err(err) => {
+                log::warn!("[pager] truncate: pgno = {}: {:?}", pgno, err);
+                Err(err)
+            }
+            x => x,
+        }
+    }
+
+    fn get_page_inner(&self, pos: Option<ltx::Pos>, pgno: ltx::PageNum) -> io::Result<Page> {
+        match self.get_page_local(pos, pgno) {
+            Ok(page) => return Ok(page),
+            Err(err) if err.kind() != io::ErrorKind::NotFound => return Err(err),
+            _ => (),
+        };
+
+        self.get_page_remote(pos, pgno)
+    }
+
+    fn get_page_local(&self, _pos: Option<ltx::Pos>, pgno: ltx::PageNum) -> io::Result<Page> {
+        let mut file = fs::File::open(self.root.join(pgno.file_name()))?;
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf)?;
+
+        Ok(Page::new(pgno, buf))
+    }
+
+    fn get_page_remote(&self, pos: Option<ltx::Pos>, pgno: ltx::PageNum) -> io::Result<Page> {
+        let pos = if let Some(pos) = pos {
+            pos
+        } else {
+            return Err(io::ErrorKind::NotFound.into());
+        };
+
+        let pages = self.client.get_page(&self.db, pos, pgno)?;
+
+        let mut requested_page: Option<Page> = None;
+        for page in pages {
+            log::trace!(
+                "[pager] get_page_remote: pos = {}, pgno = {}, got = {}",
+                pos,
+                pgno,
+                page.number(),
+            );
+            let page_ref = PageRef {
+                data: page.as_ref(),
+                number: page.number(),
+            };
+            self.del_page(page_ref.number())?;
+            self.put_page(page_ref)?;
+
+            if page.number() == pgno {
+                requested_page = Some(Page::new(page.number(), page.into_inner()))
+            }
+        }
+
+        requested_page.ok_or(io::ErrorKind::NotFound.into())
+    }
+
+    fn put_page_inner(&self, page: PageRef) -> io::Result<()> {
+        let tmp_name = self.root.join(format!("{}.tmp", page.number()));
+        let final_name = self.root.join(page.number().file_name());
+
+        let mut file = fs::File::create(&tmp_name)?;
+        file.write_all(page.as_ref())?;
+        fs::rename(tmp_name, final_name)
+    }
+
+    fn del_page_inner(&self, pgno: ltx::PageNum) -> io::Result<()> {
+        let name = self.root.join(pgno.file_name());
+        match fs::remove_file(name) {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            x => x,
+        }
+    }
+
+    fn truncate_inner(&self, pgno: ltx::PageNum) -> io::Result<()> {
+        let fname: ffi::OsString = pgno.file_name().into();
+
+        for entry in fs::read_dir(&self.root)? {
+            let entry = entry?;
+            if entry.file_name() <= fname {
+                continue;
+            }
+
+            fs::remove_file(entry.path())?;
+        }
+
+        Ok(())
+    }
 }
 
 /// A struct that owns a single database page.
-/// It is cheap to clone a `page` as the underlying storage is shared
-/// between the copies.
-#[derive(Clone)]
 pub(crate) struct Page {
-    data: Arc<Vec<u8>>,
+    data: Vec<u8>,
     _number: ltx::PageNum,
     checksum: ltx::Checksum,
 }
@@ -37,7 +199,7 @@ impl Page {
     pub(crate) fn new(number: ltx::PageNum, data: Vec<u8>) -> Page {
         let checksum = data.page_checksum(number);
         Page {
-            data: Arc::new(data),
+            data,
             _number: number,
             checksum,
         }
@@ -60,7 +222,7 @@ impl AsRef<[u8]> for Page {
     }
 }
 
-/// A struct that borrows a single database page.
+/// A struct that borrows a single database page. Cheap to construct and copy.
 #[derive(Clone, Copy)]
 pub(crate) struct PageRef<'a> {
     data: &'a [u8],
@@ -94,214 +256,5 @@ impl<'a> fmt::Display for PosLogger<'a> {
         } else {
             write!(f, "<unknown>")
         }
-    }
-}
-
-/// A [Pager] that logs errors returned from the underlying pagers.
-pub(crate) struct LoggingPager<P> {
-    inner: P,
-}
-
-impl<P: Pager> LoggingPager<P> {
-    pub(crate) fn new(pager: P) -> LoggingPager<P> {
-        LoggingPager { inner: pager }
-    }
-}
-
-impl<P: Pager> Pager for LoggingPager<P> {
-    fn get_page(&self, state: Option<ltx::Pos>, number: ltx::PageNum) -> io::Result<Page> {
-        match self.inner.get_page(state, number) {
-            Ok(page) => Ok(page),
-            Err(err) => {
-                log::warn!(
-                    "[pager] get_page: state = {}, number = {}: {:?}",
-                    PosLogger(&state),
-                    number,
-                    err
-                );
-                Err(err)
-            }
-        }
-    }
-
-    fn put_page(&self, page: PageRef) -> io::Result<()> {
-        match self.inner.put_page(page) {
-            Ok(()) => Ok(()),
-            Err(err) => {
-                log::warn!("[pager] put_page: number = {}: {:?}", page.number(), err,);
-                Err(err)
-            }
-        }
-    }
-
-    fn del_page(&self, number: ltx::PageNum) -> io::Result<()> {
-        match self.inner.del_page(number) {
-            Ok(()) => Ok(()),
-            Err(err) => {
-                log::warn!("[pager] del_page: number = {}: {:?}", number, err,);
-                Err(err)
-            }
-        }
-    }
-
-    fn truncate(&self, number: ltx::PageNum) -> io::Result<()> {
-        match self.inner.truncate(number) {
-            Ok(()) => Ok(()),
-            Err(err) => {
-                log::warn!("[pager] truncate: number = {}: {:?}", number, err,);
-                Err(err)
-            }
-        }
-    }
-}
-
-/// A [Pager] that translates [std::io::ErrorKind::NotFound] errors into
-/// [std::io::ErrorKind::UnexpectedEof] errors.
-pub(crate) struct ShortReadPager<P> {
-    inner: P,
-}
-
-impl<P: Pager> ShortReadPager<P> {
-    pub(crate) fn new(pager: P) -> ShortReadPager<P> {
-        ShortReadPager { inner: pager }
-    }
-}
-
-impl<P: Pager> Pager for ShortReadPager<P> {
-    fn get_page(&self, state: Option<ltx::Pos>, number: ltx::PageNum) -> io::Result<Page> {
-        match self.inner.get_page(state, number) {
-            Ok(page) => Ok(page),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                Err(io::ErrorKind::UnexpectedEof.into())
-            }
-            Err(err) => Err(err),
-        }
-    }
-
-    fn put_page(&self, page: PageRef) -> io::Result<()> {
-        self.inner.put_page(page)
-    }
-
-    fn del_page(&self, number: ltx::PageNum) -> io::Result<()> {
-        self.inner.del_page(number)
-    }
-
-    fn truncate(&self, number: ltx::PageNum) -> io::Result<()> {
-        self.inner.truncate(number)
-    }
-}
-
-/// A [Pager] that uses local filesystem to store pages.
-/// It assumes that it always works with the up-to-date database states
-/// and cannot fetch pages at particular state.
-pub(crate) struct FilesystemPager {
-    db: String,
-    root: path::PathBuf,
-    client: Arc<lfsc::Client>,
-}
-
-impl FilesystemPager {
-    pub(crate) fn new<P: AsRef<Path>>(
-        db: &str,
-        path: P,
-        client: Arc<lfsc::Client>,
-    ) -> io::Result<FilesystemPager> {
-        fs::create_dir_all(path.as_ref())?;
-
-        Ok(FilesystemPager {
-            db: db.into(),
-            root: path.as_ref().to_path_buf(),
-            client,
-        })
-    }
-
-    fn get_page_local(&self, _state: Option<ltx::Pos>, number: ltx::PageNum) -> io::Result<Page> {
-        let mut file = fs::File::open(self.root.join(number.file_name()))?;
-        let mut buf = Vec::new();
-        file.read_to_end(&mut buf)?;
-
-        Ok(Page::new(number, buf))
-    }
-
-    fn get_page_remote(&self, state: Option<ltx::Pos>, number: ltx::PageNum) -> io::Result<Page> {
-        let pos = if let Some(pos) = state {
-            pos
-        } else {
-            return Err(io::ErrorKind::NotFound.into());
-        };
-
-        let pages = self.client.get_page(&self.db, pos, number)?;
-
-        let mut requested_page: Option<Page> = None;
-        for page in pages {
-            let page_ref = PageRef {
-                data: page.as_ref(),
-                number: page.number(),
-            };
-            self.del_page(number)?;
-            self.put_page(page_ref)?;
-
-            if page.number() == number {
-                requested_page = Some(Page::new(page.number(), page.into_inner()))
-            }
-        }
-
-        requested_page.ok_or(io::ErrorKind::NotFound.into())
-    }
-}
-
-impl Pager for FilesystemPager {
-    fn get_page(&self, state: Option<ltx::Pos>, number: ltx::PageNum) -> io::Result<Page> {
-        log::debug!(
-            "[fs-pager] get_page: state = {}, number = {}",
-            PosLogger(&state),
-            number,
-        );
-
-        match self.get_page_local(state, number) {
-            Ok(page) => return Ok(page),
-            Err(err) if err.kind() != io::ErrorKind::NotFound => return Err(err),
-            _ => (),
-        };
-
-        self.get_page_remote(state, number)
-    }
-
-    fn put_page(&self, page: PageRef) -> io::Result<()> {
-        log::debug!("[fs-pager] put_page: number = {}", page.number());
-
-        let tmp_name = self.root.join(format!("{}.tmp", page.number()));
-        let final_name = self.root.join(page.number().file_name());
-
-        let mut file = fs::File::create(&tmp_name)?;
-        file.write_all(page.as_ref())?;
-        fs::rename(tmp_name, final_name)
-    }
-
-    fn del_page(&self, number: ltx::PageNum) -> io::Result<()> {
-        log::debug!("[fs-pager] del_page: number = {}", number);
-
-        let name = self.root.join(number.file_name());
-        match fs::remove_file(name) {
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-            x => x,
-        }
-    }
-
-    fn truncate(&self, number: ltx::PageNum) -> io::Result<()> {
-        log::debug!("[fs-pager] truncate: number = {}", number);
-
-        let fname: ffi::OsString = number.file_name().into();
-
-        for entry in fs::read_dir(&self.root)? {
-            let entry = entry?;
-            if entry.file_name() <= fname {
-                continue;
-            }
-
-            fs::remove_file(entry.path())?;
-        }
-
-        Ok(())
     }
 }

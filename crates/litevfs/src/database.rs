@@ -1,7 +1,7 @@
 use crate::{
     lfsc,
     locks::{ConnLock, VfsLock},
-    pager::{FilesystemPager, LoggingPager, PageRef, Pager, ShortReadPager},
+    pager::{PageRef, Pager},
 };
 use sqlite_vfs::OpenAccess;
 use std::{
@@ -117,7 +117,7 @@ pub(crate) struct Database {
     page_size: Option<ltx::PageSize>,
     pos: Option<ltx::Pos>,
 
-    pager: Box<dyn Pager + Send>,
+    pager: Pager,
     dirty_pages: BTreeMap<ltx::PageNum, Option<ltx::Checksum>>,
 }
 
@@ -132,11 +132,7 @@ impl Database {
         let ltx_path = path.join("ltx");
         fs::create_dir_all(&ltx_path)?;
 
-        let pager = LoggingPager::new(ShortReadPager::new(FilesystemPager::new(
-            name,
-            dbpath,
-            Arc::clone(&client),
-        )?));
+        let pager = Pager::new(name, dbpath, Arc::clone(&client))?;
         let page_size = match pager.get_page(pos, ltx::PageNum::ONE) {
             Ok(page) => Some(Database::parse_page_size_database(page.as_ref())?),
             Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => None,
@@ -151,7 +147,7 @@ impl Database {
             ltx_path,
             page_size,
             pos,
-            pager: Box::new(pager),
+            pager,
             dirty_pages: BTreeMap::new(),
         })
     }

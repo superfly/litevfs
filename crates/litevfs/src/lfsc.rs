@@ -170,13 +170,13 @@ impl Client {
         &self,
         db: &str,
         pos: ltx::Pos,
-        number: ltx::PageNum,
+        pgno: ltx::PageNum,
     ) -> Result<Vec<Page>> {
         log::debug!(
-            "[lfsc] get_page: db = {}, pos = {}, number = {}",
+            "[lfsc] get_page: db = {}, pos = {}, pgno = {}",
             db,
             pos,
-            number
+            pgno
         );
 
         #[derive(serde::Deserialize)]
@@ -189,7 +189,7 @@ impl Client {
         u.query_pairs_mut()
             .append_pair("db", db)
             .append_pair("pos", &pos.to_string())
-            .append_pair("pgno", &number.to_string());
+            .append_pair("pgno", &pgno.to_string());
 
         let req = self.make_request("GET", u);
         let resp = self.process_response(req.call())?;
