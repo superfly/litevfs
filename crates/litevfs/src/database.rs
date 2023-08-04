@@ -22,13 +22,11 @@ pub(crate) struct DatabaseManager {
 }
 
 impl DatabaseManager {
-    pub(crate) fn new<P: AsRef<Path>>(base_path: P, client: lfsc::Client) -> DatabaseManager {
-        let client = Arc::new(client);
-
+    pub(crate) fn new(pager: Arc<Pager>, client: Arc<lfsc::Client>) -> DatabaseManager {
         DatabaseManager {
-            pager: Arc::new(Pager::new(base_path, Arc::clone(&client))),
+            pager,
             databases: HashMap::new(),
-            client: Arc::clone(&client),
+            client,
         }
     }
 

@@ -47,6 +47,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a3e2c3daef883ecc1b5d58c15adae93470a91d425f3532ba1695849656af3fc1"
 
 [[package]]
+name = "bytesize"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38fcc2979eff34a4b84e1cf9a1e3da42a7d44b3b690a40cdcb23e3d556cfb2e5"
+
+[[package]]
 name = "caches"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -248,6 +254,7 @@ name = "litevfs"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "bytesize",
  "caches",
  "env_logger",
  "fs2",

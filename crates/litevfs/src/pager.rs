@@ -1,11 +1,15 @@
 use crate::lfsc;
+use bytesize::ByteSize;
 use caches::{Cache, SegmentedCache};
 use ltx::PageChecksum;
 use std::{
     ffi, fmt, fs,
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
 };
 use string_interner::{DefaultSymbol, StringInterner};
 
@@ -18,8 +22,8 @@ pub(crate) struct Pager {
     interner: Mutex<StringInterner>,
     lru: Mutex<SegmentedCache<PageCacheKey, ()>>,
 
-    min_available_space: u64,
-    max_stored_pages: Option<usize>,
+    min_available_space: AtomicU64,
+    max_cached_pages: AtomicUsize,
 }
 
 impl Pager {
@@ -37,9 +41,8 @@ impl Pager {
             // the cache is not resizable.
             lru: Mutex::new(SegmentedCache::new(6500, 26000).unwrap()),
 
-            // TODO: make configurable
-            min_available_space: 10 * 1024 * 1024,
-            max_stored_pages: None,
+            min_available_space: AtomicU64::new(10 * 1024 * 1024),
+            max_cached_pages: AtomicUsize::new(0),
         }
     }
 
@@ -140,6 +143,26 @@ impl Pager {
             }
             x => x,
         }
+    }
+
+    /// Returns the minimum available space that pager is trying to keep on the FS.
+    pub(crate) fn min_available_space(&self) -> u64 {
+        self.min_available_space.load(Ordering::Acquire)
+    }
+
+    /// Sets the minimum available space that pager needs to maintain on the FS.
+    pub(crate) fn set_min_available_space(&self, maa: u64) {
+        self.min_available_space.store(maa, Ordering::Release)
+    }
+
+    /// Returns the maximum number of pages that pager will cache on local FS.
+    pub(crate) fn max_cached_pages(&self) -> usize {
+        self.max_cached_pages.load(Ordering::Acquire)
+    }
+
+    /// Sets the maximum number of pages that pager will cache on local FS.
+    pub(crate) fn set_max_cached_pages(&self, mcp: usize) {
+        self.max_cached_pages.store(mcp, Ordering::Release)
     }
 
     fn get_page_inner(
@@ -270,20 +293,22 @@ impl Pager {
     }
 
     fn reclaim_space(&self) -> io::Result<()> {
+        let max_pages = self.max_cached_pages();
+        let min_space = self.min_available_space();
+
         loop {
             let pages = self.lru.lock().unwrap().len();
             let space = fs2::available_space(&self.root)?;
 
             log::trace!(
-                "[pager] reclaim_space: pages = {}, space = {}",
+                "[pager] reclaim_space: pages = {}, max_pages = {}, space = {}, min_space = {}",
                 pages,
-                space
+                max_pages,
+                ByteSize::b(space).to_string_as(true),
+                ByteSize::b(min_space).to_string_as(true),
             );
 
-            if pages == 0
-                || space >= self.min_available_space
-                || Some(pages) <= self.max_stored_pages
-            {
+            if pages == 0 || space >= min_space && (pages <= max_pages || max_pages == 0) {
                 return Ok(());
             }
 

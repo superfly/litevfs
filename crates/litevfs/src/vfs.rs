@@ -2,7 +2,9 @@ use crate::{
     database::{Database, DatabaseManager},
     lfsc,
     locks::{ConnLock, VfsLock},
+    pager::Pager,
 };
+use bytesize::ByteSize;
 use rand::Rng;
 use sqlite_vfs::{LockKind, OpenAccess, OpenKind, OpenOptions, Vfs};
 use std::{
@@ -20,6 +22,7 @@ use std::{
 /// LiteVfs implements SQLite VFS ops.
 pub struct LiteVfs {
     path: PathBuf,
+    pager: Arc<Pager>,
     database_manager: Mutex<DatabaseManager>,
     temp_counter: AtomicU64,
 }
@@ -61,7 +64,11 @@ impl Vfs for LiteVfs {
                 .get_database(dbname, opts.access)
                 .map(|database| {
                     let conn_lock = database.read().unwrap().conn_lock();
-                    LiteHandle::new(LiteDatabaseHandle::new(database, conn_lock))
+                    LiteHandle::new(LiteDatabaseHandle::new(
+                        Arc::clone(&self.pager),
+                        database,
+                        conn_lock,
+                    ))
                 }),
             OpenKind::TempDb => Ok(LiteHandle::new(LiteTempDbHandle::new(
                 self.path.join(db),
@@ -154,9 +161,13 @@ impl Vfs for LiteVfs {
 
 impl LiteVfs {
     pub(crate) fn new<P: AsRef<Path>>(path: P, client: lfsc::Client) -> Self {
+        let client = Arc::new(client);
+        let pager = Arc::new(Pager::new(&path, Arc::clone(&client)));
+
         LiteVfs {
             path: path.as_ref().to_path_buf(),
-            database_manager: Mutex::new(DatabaseManager::new(path, client)),
+            pager: Arc::clone(&pager),
+            database_manager: Mutex::new(DatabaseManager::new(pager, client)),
             temp_counter: AtomicU64::new(0),
         }
     }
@@ -347,13 +358,18 @@ impl sqlite_vfs::DatabaseHandle for LiteHandle {
 }
 
 struct LiteDatabaseHandle {
+    pager: Arc<Pager>,
     database: Arc<RwLock<Database>>,
     lock: ConnLock,
 }
 
 impl LiteDatabaseHandle {
-    pub(crate) fn new(database: Arc<RwLock<Database>>, lock: ConnLock) -> Self {
-        LiteDatabaseHandle { database, lock }
+    pub(crate) fn new(pager: Arc<Pager>, database: Arc<RwLock<Database>>, lock: ConnLock) -> Self {
+        LiteDatabaseHandle {
+            pager,
+            database,
+            lock,
+        }
     }
 }
 
@@ -398,6 +414,26 @@ impl DatabaseHandle for LiteDatabaseHandle {
                     "WAL is not supported by LiteVFS",
                 )))
             }
+            ("litevfs_min_available_space", None) => Some(Ok(Some(
+                ByteSize::b(self.pager.min_available_space()).to_string_as(true),
+            ))),
+            ("litevfs_min_available_space", Some(val)) => match val.parse::<ByteSize>() {
+                Ok(val) => {
+                    self.pager.set_min_available_space(val.as_u64());
+                    Some(Ok(None))
+                }
+                Err(e) => Some(Err(io::Error::new(io::ErrorKind::InvalidInput, e))),
+            },
+            ("litevfs_max_cached_pages", None) => {
+                Some(Ok(Some(self.pager.max_cached_pages().to_string())))
+            }
+            ("litevfs_max_cached_pages", Some(val)) => match val.parse::<usize>() {
+                Ok(val) => {
+                    self.pager.set_max_cached_pages(val);
+                    Some(Ok(None))
+                }
+                Err(e) => Some(Err(io::Error::new(io::ErrorKind::InvalidInput, e))),
+            },
             _ => None,
         }
     }
