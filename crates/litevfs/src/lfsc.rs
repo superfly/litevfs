@@ -267,11 +267,9 @@ impl Client {
     ) -> Result<ureq::Response> {
         match resp {
             Ok(resp) => {
-                let update_instance_id =
-                    self.instance_id.read().unwrap().as_deref() != resp.header("Lfsc-Instance-Id");
-                if update_instance_id {
-                    *self.instance_id.write().unwrap() =
-                        resp.header("Lfsc-Instance-Id").map(Into::into);
+                let mut instance_id = self.instance_id.write().unwrap();
+                if instance_id.as_deref() != resp.header("Lfsc-Instance-Id") {
+                    *instance_id = resp.header("Lfsc-Instance-Id").map(Into::into);
                 }
 
                 Ok(resp)
