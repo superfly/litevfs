@@ -70,6 +70,7 @@ pub(crate) struct Client {
     host: url::Url,
     token: Option<String>,
     cluster: Option<String>,
+    cluster_id: Option<String>,
     instance_id: sync::RwLock<Option<String>>,
 }
 
@@ -111,6 +112,9 @@ impl AsRef<[u8]> for Page {
 }
 
 impl Client {
+    const CLUSTER_ID_LEN: usize = 20;
+    const CLUSTER_ID_PREFIX: &'static str = "LFSC";
+
     pub(crate) fn builder() -> ClientBuilder {
         ClientBuilder::default()
     }
@@ -133,7 +137,29 @@ impl Client {
             Err(_) => builder,
         };
 
-        Ok(builder.build())
+        let mut client = builder.build();
+
+        let info = client.info()?;
+        client.set_cluster_id(if let Some(cluster_id) = info.cluster_id {
+            cluster_id
+        } else {
+            Client::generate_cluster_id()
+        });
+
+        Ok(client)
+    }
+
+    pub(crate) fn set_cluster_id(&mut self, id: String) {
+        self.cluster_id = Some(id)
+    }
+
+    pub(crate) fn generate_cluster_id() -> String {
+        use rand::Rng;
+
+        let mut buf = [0; (Client::CLUSTER_ID_LEN - Client::CLUSTER_ID_PREFIX.len()) / 2];
+        rand::thread_rng().fill(&mut buf);
+
+        format!("{}{}", Client::CLUSTER_ID_PREFIX, hex::encode_upper(buf))
     }
 
     pub(crate) fn pos_map(&self) -> Result<HashMap<String, ltx::Pos>> {
@@ -197,6 +223,18 @@ impl Client {
         Ok(resp.into_json::<GetPageResponse>()?.pages)
     }
 
+    pub(crate) fn info(&self) -> Result<Info> {
+        log::debug!("[lfsc] info");
+
+        let mut u = self.host.clone();
+        u.set_path("/info");
+
+        let req = self.make_request("GET", u);
+        let resp = self.process_response(req.call())?;
+
+        Ok(resp.into_json()?)
+    }
+
     fn make_request(&self, method: &str, mut u: url::Url) -> ureq::Request {
         if let Some(ref cluster) = self.cluster {
             u.query_pairs_mut().append_pair("cluster", cluster);
@@ -208,6 +246,9 @@ impl Client {
         }
         if let Some(instance_id) = self.instance_id.read().unwrap().as_deref() {
             req = req.set("fly-force-instance-id", instance_id);
+        }
+        if let Some(ref cluster_id) = self.cluster_id {
+            req = req.set("Litefs-Cluster-Id", cluster_id)
         }
 
         req
@@ -244,6 +285,12 @@ impl Client {
     }
 }
 
+#[derive(serde::Deserialize)]
+pub(crate) struct Info {
+    #[serde(rename = "clusterID")]
+    pub(crate) cluster_id: Option<String>,
+}
+
 /// A LiteFS Cloud client builder.
 #[derive(Default)]
 pub(crate) struct ClientBuilder {
@@ -275,6 +322,7 @@ impl ClientBuilder {
                 .unwrap_or(url::Url::parse("https://litefs.fly.io").unwrap()),
             token: self.token,
             cluster: self.cluster,
+            cluster_id: None,
             instance_id: sync::RwLock::new(None),
         }
     }
