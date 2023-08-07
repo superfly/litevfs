@@ -146,6 +146,13 @@ impl Client {
             Client::generate_cluster_id()
         });
 
+        log::info!(
+            "[lfsc] from_env: host = {}, cluster = {:?}, cluster_id = {:?}",
+            client.host,
+            client.cluster,
+            client.cluster_id
+        );
+
         Ok(client)
     }
 
