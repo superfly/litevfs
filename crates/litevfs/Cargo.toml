@@ -4,13 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-crate-type = ["cdylib", "rlib"]
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+crate-type = ["cdylib"]
 
 [dependencies]
 bytesize = "1.2"
 caches = "0.2"
-env_logger = "0.10"
+env_logger = { version = "0.10", default-features = false }
 fs2 = "0.4"
 hex = "0.4"
 log = "0.4"
