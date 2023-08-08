@@ -8,7 +8,6 @@ crate-type = ["cdylib", "rlib"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-base64 = "0.21"
 bytesize = "1.2"
 caches = "0.2"
 env_logger = "0.10"
@@ -18,6 +17,7 @@ log = "0.4"
 ltx = { git = "ssh://git@github.com/superfly/ltx-rs.git", branch = "main" }
 rand = "0.8"
 serde = { version = "1.0", features = ["derive"] }
+serde_with = { version = "3.2", features = ["base64", "macros"] }
 string-interner = "0.14"
 sqlite-vfs = { path = "../sqlite-vfs", features = ["syscall", "loadext"] }
 thiserror = "1.0"

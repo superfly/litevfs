@@ -88,6 +88,13 @@ impl DatabaseManager {
             return Ok(None);
         }
 
+        log::info!(
+            "[manager] get_database_remote: name = {}, access = {:?}, pos = {:?}",
+            dbname,
+            access,
+            pos
+        );
+
         Ok(Some(Arc::new(RwLock::new(Database::new(
             dbname,
             pos,

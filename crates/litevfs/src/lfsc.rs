@@ -1,4 +1,3 @@
-use base64::{engine::general_purpose, Engine};
 use std::{collections::HashMap, env, fmt, io, sync};
 
 /// All possible errors returned by the LFSC client.
@@ -75,22 +74,13 @@ pub(crate) struct Client {
 }
 
 /// A single database page fetched from LFSC.
+#[serde_with::serde_as]
 #[derive(Debug, PartialEq, serde::Deserialize)]
 pub(crate) struct Page {
-    #[serde(deserialize_with = "deserialize_page")]
+    #[serde_as(as = "serde_with::base64::Base64")]
     data: Vec<u8>,
     #[serde(rename = "pgno")]
     number: ltx::PageNum,
-}
-
-fn deserialize_page<'de, D>(de: D) -> std::result::Result<Vec<u8>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let encoded: &str = serde::Deserialize::deserialize(de)?;
-    general_purpose::STANDARD
-        .decode(encoded)
-        .map_err(serde::de::Error::custom)
 }
 
 impl Page {
