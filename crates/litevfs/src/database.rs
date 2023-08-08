@@ -2,6 +2,7 @@ use crate::{
     lfsc,
     locks::{ConnLock, VfsLock},
     pager::{PageRef, Pager},
+    PosLogger,
 };
 use sqlite_vfs::OpenAccess;
 use std::{
@@ -89,10 +90,10 @@ impl DatabaseManager {
         }
 
         log::info!(
-            "[manager] get_database_remote: name = {}, access = {:?}, pos = {:?}",
+            "[manager] get_database_remote: name = {}, access = {:?}, pos = {}",
             dbname,
             access,
-            pos
+            PosLogger(&pos)
         );
 
         Ok(Some(Arc::new(RwLock::new(Database::new(

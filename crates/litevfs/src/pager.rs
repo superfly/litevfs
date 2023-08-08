@@ -1,9 +1,9 @@
-use crate::lfsc;
+use crate::{lfsc, PosLogger};
 use bytesize::ByteSize;
 use caches::{Cache, SegmentedCache};
 use ltx::PageChecksum;
 use std::{
-    ffi, fmt, fs,
+    ffi, fs,
     io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::{
@@ -399,18 +399,6 @@ impl<'a> PageRef<'a> {
 impl<'a> AsRef<[u8]> for PageRef<'a> {
     fn as_ref(&self) -> &[u8] {
         self.data
-    }
-}
-
-struct PosLogger<'a>(&'a Option<ltx::Pos>);
-
-impl<'a> fmt::Display for PosLogger<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        if let Some(pos) = self.0 {
-            pos.fmt(f)
-        } else {
-            write!(f, "<unknown>")
-        }
     }
 }
 
