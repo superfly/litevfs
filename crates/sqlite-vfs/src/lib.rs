@@ -987,6 +987,8 @@ mod io {
             let kind = err.kind();
             if kind == ErrorKind::UnexpectedEof {
                 return ffi::SQLITE_IOERR_SHORT_READ;
+            } else if let Some(code) = err.get_ref().and_then(|inner| inner.downcast_ref::<CodeError>()) {
+                return code.0 as c_int;
             } else {
                 return state.set_last_error(ffi::SQLITE_IOERR_READ, err);
             }
@@ -2010,6 +2012,24 @@ impl std::fmt::Display for RegisterError {
 impl From<std::ffi::NulError> for RegisterError {
     fn from(err: std::ffi::NulError) -> Self {
         Self::Nul(err)
+    }
+}
+
+#[derive(Debug)]
+pub struct CodeError(i32);
+
+impl CodeError {
+    /// Construct a new error with the specific SQLite error code.
+    pub fn new(code: i32) -> CodeError {
+        CodeError(code)
+    }
+}
+
+impl std::error::Error for CodeError {}
+
+impl std::fmt::Display for CodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SQLite error {}", self.0)
     }
 }
 
