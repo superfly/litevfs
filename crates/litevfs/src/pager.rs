@@ -6,6 +6,7 @@ use sqlite_vfs::CodeError;
 use std::{
     ffi, fs,
     io::{self, Read, Write},
+    os::unix::prelude::FileExt,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -101,6 +102,53 @@ impl Pager {
         }
     }
 
+    /// Copies the page starting at `offset` to the provided buffer.
+    pub(crate) fn get_page_slice(
+        &self,
+        db: &str,
+        pos: Option<ltx::Pos>,
+        pgno: ltx::PageNum,
+        buf: &mut [u8],
+        offset: u64,
+    ) -> io::Result<()> {
+        log::debug!(
+            "[pager] get_page_slice: db = {}, pos = {}, pgno = {}, len = {}, offset = {}",
+            db,
+            PosLogger(&pos),
+            pgno,
+            buf.len(),
+            offset,
+        );
+
+        // Request the page either from local cache or from LFSC and convert
+        // io::ErrorKind::NotFound errors to io::ErrorKind::UnexpectedEof, as
+        // this is what local IO will return in case we read past the file.
+        // TODO: we may need to suppress duplicated calls to the same page here.
+        let r = match self.get_page_slice_inner(db, pos, pgno, buf, offset) {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                Err(io::ErrorKind::UnexpectedEof.into())
+            }
+            x => x,
+        };
+
+        // Log the error, if any
+        match r {
+            Err(err) => {
+                log::warn!(
+                    "[pager] get_page_slice: db = {}, pos = {}, pgno = {}, len = {}, offset = {}: {:?}",
+                    db,
+                    PosLogger(&pos),
+                    pgno,
+                    buf.len(),
+                    offset,
+                    err
+                );
+                Err(err)
+            }
+            x => x,
+        }
+    }
+
     /// Writes page into the local cache. The page is not shipped to LFSC until the
     /// database is committed.
     pub(crate) fn put_page(&self, db: &str, page: PageRef) -> io::Result<()> {
@@ -182,6 +230,27 @@ impl Pager {
         self.get_page_remote(db, pos, pgno)
     }
 
+    fn get_page_slice_inner(
+        &self,
+        db: &str,
+        pos: Option<ltx::Pos>,
+        pgno: ltx::PageNum,
+        buf: &mut [u8],
+        offset: u64,
+    ) -> io::Result<()> {
+        match self.get_page_slice_local(db, pos, pgno, buf, offset) {
+            Ok(page) => return Ok(page),
+            Err(err) if err.kind() != io::ErrorKind::NotFound => return Err(err),
+            _ => (),
+        };
+
+        let page = self.get_page_remote(db, pos, pgno)?;
+        let offset = offset as usize;
+        buf.copy_from_slice(&page.as_ref()[offset..offset + buf.len()]);
+
+        Ok(())
+    }
+
     fn get_page_local(
         &self,
         db: &str,
@@ -196,6 +265,23 @@ impl Pager {
         self.lru.lock().unwrap().get(&self.cache_key(db, pgno));
 
         Ok(Page::new(pgno, buf))
+    }
+
+    fn get_page_slice_local(
+        &self,
+        db: &str,
+        _pos: Option<ltx::Pos>,
+        pgno: ltx::PageNum,
+        buf: &mut [u8],
+        offset: u64,
+    ) -> io::Result<()> {
+        let file = fs::File::open(self.pages_path(db).join(PathBuf::from(pgno)))?;
+        file.read_exact_at(buf, offset)?;
+
+        // Mark the page as recently accessed
+        self.lru.lock().unwrap().get(&self.cache_key(db, pgno));
+
+        Ok(())
     }
 
     fn get_page_remote(
@@ -364,29 +450,23 @@ impl Pager {
 /// A struct that owns a single database page.
 pub(crate) struct Page {
     data: Vec<u8>,
-    _number: ltx::PageNum,
-    checksum: ltx::Checksum,
+    number: ltx::PageNum,
 }
 
 impl Page {
     /// Return a new [Page] with `number` and the given `data`.
     pub(crate) fn new(number: ltx::PageNum, data: Vec<u8>) -> Page {
-        let checksum = data.page_checksum(number);
-        Page {
-            data,
-            _number: number,
-            checksum,
-        }
+        Page { data, number }
     }
 
     /// Returns `page` number.
-    // pub(crate) fn number(&self) -> ltx::PageNum {
-    //     self._number
-    // }
+    pub(crate) fn number(&self) -> ltx::PageNum {
+        self.number
+    }
 
     /// Returns `page` checksum.
     pub(crate) fn checksum(&self) -> ltx::Checksum {
-        self.checksum
+        self.data.page_checksum(self.number())
     }
 }
 

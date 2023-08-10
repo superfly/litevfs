@@ -14,7 +14,7 @@ use std::{
     time,
 };
 
-const SQLITE_HEADER_SIZE: usize = 100;
+const SQLITE_HEADER_SIZE: u64 = 100;
 
 pub(crate) struct DatabaseManager {
     pager: Arc<Pager>,
@@ -242,35 +242,38 @@ impl Database {
     }
 
     pub(crate) fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
-        let (number, offset) = if offset as usize <= SQLITE_HEADER_SIZE {
-            (ltx::PageNum::ONE, offset as usize)
+        let (number, offset) = if offset <= SQLITE_HEADER_SIZE {
+            (ltx::PageNum::ONE, offset)
         } else {
             self.ensure_aligned(buf, offset)?;
             (self.page_num_for(offset)?, 0)
         };
 
-        let page = self.pager.get_page(&self.name, self.pos, number)?;
-        buf.copy_from_slice(&page.as_ref()[offset..offset + buf.len()]);
+        self.pager
+            .get_page_slice(&self.name, self.pos, number, buf, offset)?;
 
         Ok(())
     }
 
     pub(crate) fn write_at(&mut self, buf: &[u8], offset: u64) -> io::Result<()> {
-        if self.page_size().is_err() && offset == 0 && buf.len() >= SQLITE_HEADER_SIZE {
+        if self.page_size().is_err() && offset == 0 && buf.len() >= (SQLITE_HEADER_SIZE as usize) {
             self.set_page_size(Database::parse_page_size_database(buf)?);
         }
 
         self.ensure_aligned(buf, offset)?;
         let page_num = self.page_num_for(offset)?;
+        let page = PageRef::new(page_num, buf);
+        self.pager.put_page(&self.name, page)?;
+
+        if page_num == ltx::PageNum::lock_page(self.page_size()?) {
+            return Ok(());
+        }
+
         let current_checksum = match self.pager.get_page(&self.name, self.pos, page_num) {
             Ok(page) => Some(page.checksum()),
             Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => None,
             Err(err) => return Err(err),
         };
-
-        let page = PageRef::new(page_num, buf);
-        self.pager.put_page(&self.name, page)?;
-
         self.dirty_pages
             .entry(page.number())
             .or_insert(current_checksum);
@@ -373,11 +376,6 @@ impl Database {
             .unwrap_or(0);
         let mut pages = Vec::with_capacity(self.dirty_pages.len());
         for (&page_num, &prev_checksum) in self.dirty_pages.iter().filter(|&(&n, _)| n <= commit) {
-            // Skip the lock page
-            if page_num == ltx::PageNum::lock_page(self.page_size()?) {
-                continue;
-            }
-
             let page = self.pager.get_page(&self.name, self.pos, page_num)?;
             if let Some(prev_checksum) = prev_checksum {
                 checksum ^= prev_checksum.into_inner();
