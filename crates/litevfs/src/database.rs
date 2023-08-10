@@ -231,6 +231,7 @@ impl Database {
     }
 
     pub(crate) fn size(&self) -> io::Result<u64> {
+        // TODO: cache commit value?
         let page1 = match self.pager.get_page(&self.name, self.pos, ltx::PageNum::ONE) {
             Ok(page1) => page1,
             Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => return Ok(0),
