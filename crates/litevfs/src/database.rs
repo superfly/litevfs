@@ -373,6 +373,11 @@ impl Database {
             .unwrap_or(0);
         let mut pages = Vec::with_capacity(self.dirty_pages.len());
         for (&page_num, &prev_checksum) in self.dirty_pages.iter().filter(|&(&n, _)| n <= commit) {
+            // Skip the lock page
+            if page_num == ltx::PageNum::lock_page(self.page_size()?) {
+                continue;
+            }
+
             let page = self.pager.get_page(&self.name, self.pos, page_num)?;
             if let Some(prev_checksum) = prev_checksum {
                 checksum ^= prev_checksum.into_inner();
