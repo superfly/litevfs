@@ -987,7 +987,10 @@ mod io {
             let kind = err.kind();
             if kind == ErrorKind::UnexpectedEof {
                 return ffi::SQLITE_IOERR_SHORT_READ;
-            } else if let Some(code) = err.get_ref().and_then(|inner| inner.downcast_ref::<CodeError>()) {
+            } else if let Some(code) = err
+                .get_ref()
+                .and_then(|inner| inner.downcast_ref::<CodeError>())
+            {
                 return code.0 as c_int;
             } else {
                 return state.set_last_error(ffi::SQLITE_IOERR_READ, err);
