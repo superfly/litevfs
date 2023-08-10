@@ -1,5 +1,20 @@
 use crate::{lfsc, LiteVfs};
+use rand::distributions::{Alphanumeric, DistString};
 use sqlite_vfs::{ffi, RegisterError};
+use std::{env, fs, process};
+
+fn prepare() -> Result<(lfsc::Client, String), Box<dyn std::error::Error + 'static>> {
+    let client = lfsc::Client::from_env()?;
+
+    let cache_dir = env::var("LITEVFS_CACHE_DIR").unwrap_or(format!(
+        "litevfs-{}-{}",
+        process::id(),
+        Alphanumeric.sample_string(&mut rand::thread_rng(), 8)
+    ));
+    fs::create_dir_all(&cache_dir)?;
+
+    Ok((client, cache_dir))
+}
 
 #[no_mangle]
 #[cfg(not(feature = "linkable"))]
@@ -14,8 +29,8 @@ pub extern "C" fn sqlite3_litevfs_init(
     env_logger::try_init().ok();
 
     log::info!("registering LiteVFS");
-    let client = match lfsc::Client::from_env() {
-        Ok(client) => client,
+    let (client, cache_dir) = match prepare() {
+        Ok(ret) => ret,
         Err(err) if !pzErrMsg.is_null() => {
             let msg = CString::new(err.to_string()).unwrap();
             let msg_slice = msg.to_bytes_with_nul();
@@ -33,7 +48,7 @@ pub extern "C" fn sqlite3_litevfs_init(
 
     let code = match unsafe { sqlite_vfs::DynamicExtension::build(pApi) }.register(
         "litevfs",
-        LiteVfs::new("/tmp", client),
+        LiteVfs::new(cache_dir, client),
         true,
     ) {
         Ok(_) => ffi::SQLITE_OK_LOAD_PERMANENTLY,
@@ -51,8 +66,8 @@ pub extern "C" fn sqlite3_litevfs_init(_unused: *const std::ffi::c_char) -> i32 
     env_logger::try_init().ok();
 
     log::info!("registering LiteVFS");
-    let client = match lfsc::Client::from_env() {
-        Ok(client) => client,
+    let (client, cache_dir) = match prepare() {
+        Ok(ret) => ret,
         Err(err) => {
             log::warn!("{}", err);
             return ffi::SQLITE_ERROR;
@@ -61,7 +76,7 @@ pub extern "C" fn sqlite3_litevfs_init(_unused: *const std::ffi::c_char) -> i32 
 
     let code = match sqlite_vfs::LinkedExtension::build().register(
         "litevfs",
-        LiteVfs::new("/tmp", client),
+        LiteVfs::new(cache_dir, client),
         true,
     ) {
         Ok(_) => ffi::SQLITE_OK,
