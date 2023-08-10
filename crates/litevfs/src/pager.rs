@@ -77,6 +77,7 @@ impl Pager {
         // Request the page either from local cache or from LFSC and convert
         // io::ErrorKind::NotFound errors to io::ErrorKind::UnexpectedEof, as
         // this is what local IO will return in case we read past the file.
+        // TODO: we may need to suppress duplicated calls to the same page here.
         let r = match self.get_page_inner(db, pos, pgno) {
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
                 Err(io::ErrorKind::UnexpectedEof.into())
