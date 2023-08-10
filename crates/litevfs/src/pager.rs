@@ -1,7 +1,8 @@
-use crate::{lfsc, PosLogger};
+use crate::{lfsc, PosLogger, LITEVFS_IOERR_POS_MISMATCH};
 use bytesize::ByteSize;
 use caches::{Cache, SegmentedCache};
 use ltx::PageChecksum;
+use sqlite_vfs::CodeError;
 use std::{
     ffi, fs,
     io::{self, Read, Write},
@@ -208,7 +209,24 @@ impl Pager {
             return Err(io::ErrorKind::NotFound.into());
         };
 
-        let pages = self.client.get_page(db, pos, pgno)?;
+        let pages = match self.client.get_page(db, pos, pgno) {
+            Ok(pages) => pages,
+            Err(lfsc::Error::PosMismatch(x)) => {
+                log::warn!("get_page_remote: db = {}, pgno = {}, pos mismatch error, requested = {}, got = {}",
+                    db, pgno, pos, x);
+                // LFSC no longer have the requested pos. At this point we may try to recover
+                // from this ourselves, or tell the user to retry the transaction. The only
+                // safe situation when we can recover is when this is the very first read
+                // of a TX. But, in 99.9% the very first read will hit the cache (page 1),
+                // so just return a custom error code to the user. The client code can retry
+                // the transaction automatically after that.
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    CodeError::new(LITEVFS_IOERR_POS_MISMATCH),
+                ));
+            }
+            Err(x) => return Err(x.into()),
+        };
 
         let mut requested_page: Option<Page> = None;
         for page in pages {
