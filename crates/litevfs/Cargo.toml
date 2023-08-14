@@ -12,6 +12,7 @@ caches = "0.2"
 env_logger = { version = "0.10", default-features = false }
 fs2 = "0.4"
 hex = "0.4"
+humantime = "2.1"
 log = "0.4"
 ltx = { git = "ssh://git@github.com/superfly/ltx-rs.git", branch = "main" }
 rand = "0.8"

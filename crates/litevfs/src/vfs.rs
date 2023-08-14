@@ -5,6 +5,7 @@ use crate::{
     pager::Pager,
 };
 use bytesize::ByteSize;
+use humantime::{format_duration, parse_duration};
 use rand::Rng;
 use sqlite_vfs::{LockKind, OpenAccess, OpenKind, OpenOptions, Vfs};
 use std::{
@@ -104,7 +105,7 @@ impl Vfs for LiteVfs {
                     .unwrap()
                     .get_database(dbname.as_ref(), OpenAccess::Write)?;
                 database.write().unwrap().commit_journal()?;
-                fs::remove_file(database.read().unwrap().journal_path())?;
+                fs::remove_file(&database.read().unwrap().journal_path)?;
             }
             _ => (),
         };
@@ -129,9 +130,8 @@ impl Vfs for LiteVfs {
                     .unwrap()
                     .get_database(dbname.as_ref(), OpenAccess::Write)?;
                 let database = database.read().unwrap();
-                let journal = database.journal_path();
 
-                Ok(journal.exists())
+                Ok(database.journal_path.exists())
             }
             _ => Ok(false),
         }
@@ -391,6 +391,49 @@ impl DatabaseHandle for LiteDatabaseHandle {
     }
 
     fn lock(&mut self, lock: LockKind) -> bool {
+        // This connection will read data soon, check if we need to sync with LFSC.
+        if self.lock.state() == LockKind::None
+            && lock == LockKind::Shared
+            && self.database.read().unwrap().needs_sync()
+        {
+            // This is a bit complicated. We need to initiate the sync even for read transactions,
+            // so there may be concurrent transactions executing at the time we enter `sync()`.
+            // So wait for them to finish first, otherwise they might see inconsistent state.
+            let now = time::Instant::now();
+            loop {
+                // We can't hold the database lock for long, as another connection
+                // might be in the middle of RW transaction.
+                {
+                    let mut db = self.database.write().unwrap();
+
+                    if now.elapsed() > time::Duration::from_millis(500) {
+                        log::warn!(
+                            "[database] sync: db = {}, timeout waiting for active readers, skipping sync",
+                            db.name,
+                        );
+                        break;
+                    }
+
+                    // There are no readers, try and sync. If we fail, let SQLite take the read lock, we may still be
+                    // able to read the data. The important part here is that `sync()` doesn't fetch any data, so
+                    // the cache stays consistent.
+                    if self.lock.readers() == 0 {
+                        if let Err(err) = db.sync() {
+                            log::warn!("[database] sync: db = {}: {:?}", db.name, err);
+                        }
+                        break;
+                    }
+
+                    log::debug!(
+                        "[database] sync: db = {}, waiting for active readers",
+                        db.name
+                    );
+                }
+
+                thread::sleep(time::Duration::from_millis(5));
+            }
+        }
+
         self.lock.acquire(lock)
     }
 
@@ -434,6 +477,16 @@ impl DatabaseHandle for LiteDatabaseHandle {
                 }
                 Err(e) => Some(Err(io::Error::new(io::ErrorKind::InvalidInput, e))),
             },
+            ("litevfs_cache_sync_period", None) => Some(Ok(Some(
+                format_duration(self.database.read().unwrap().sync_period).to_string(),
+            ))),
+            ("litevfs_cache_sync_period", Some(val)) => match parse_duration(val) {
+                Ok(val) => {
+                    self.database.write().unwrap().sync_period = val;
+                    Some(Ok(None))
+                }
+                Err(e) => Some(Err(io::Error::new(io::ErrorKind::InvalidInput, e))),
+            },
             _ => None,
         }
     }
@@ -442,7 +495,7 @@ impl DatabaseHandle for LiteDatabaseHandle {
         "database"
     }
     fn handle_name(&self) -> String {
-        self.database.read().unwrap().name()
+        self.database.read().unwrap().name.clone()
     }
 }
 
@@ -457,7 +510,7 @@ impl LiteJournalHandle {
             .read(true)
             .write(true)
             .create(true)
-            .open(database.read().unwrap().journal_path())?;
+            .open(&database.read().unwrap().journal_path)?;
 
         Ok(LiteJournalHandle { journal, database })
     }
@@ -497,7 +550,7 @@ impl DatabaseHandle for LiteJournalHandle {
         "journal"
     }
     fn handle_name(&self) -> String {
-        self.database.read().unwrap().name()
+        self.database.read().unwrap().name.clone()
     }
 }
 

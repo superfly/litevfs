@@ -9,7 +9,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     fs,
     io::{self, Read, Seek, SeekFrom},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, RwLock},
     time,
 };
@@ -117,14 +117,17 @@ impl DatabaseManager {
 
 pub(crate) struct Database {
     lock: VfsLock,
-    name: String,
+    pub(crate) name: String,
     client: Arc<lfsc::Client>,
     pager: Arc<Pager>,
     ltx_path: PathBuf,
-    journal_path: PathBuf,
+    pub(crate) journal_path: PathBuf,
     page_size: Option<ltx::PageSize>,
     pos: Option<ltx::Pos>,
     dirty_pages: BTreeMap<ltx::PageNum, Option<ltx::Checksum>>,
+    // XXX: we need to use real time here, as monotonic clock may not be adjusted between suspends
+    last_sync_at: time::SystemTime,
+    pub(crate) sync_period: time::Duration,
 }
 
 impl Database {
@@ -156,6 +159,8 @@ impl Database {
             page_size,
             pos,
             dirty_pages: BTreeMap::new(),
+            last_sync_at: time::SystemTime::now(),
+            sync_period: time::Duration::from_secs(1),
         })
     }
 
@@ -182,16 +187,8 @@ impl Database {
         ltx::PageSize::new(page_size).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
-    pub(crate) fn name(&self) -> String {
-        self.name.clone()
-    }
-
     pub(crate) fn conn_lock(&self) -> ConnLock {
         self.lock.conn_lock()
-    }
-
-    pub(crate) fn journal_path(&self) -> &Path {
-        self.journal_path.as_path()
     }
 
     pub(crate) fn page_size(&self) -> io::Result<ltx::PageSize> {
@@ -300,14 +297,14 @@ impl Database {
         const VALID_JOURNAL_HDR: [u8; 8] = [0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7];
         let mut hdr: [u8; 8] = [0; 8];
 
-        fs::File::open(self.journal_path())?.read_exact(&mut hdr)?;
+        fs::File::open(&self.journal_path)?.read_exact(&mut hdr)?;
 
         Ok(hdr == VALID_JOURNAL_HDR)
     }
 
     pub(crate) fn commit_journal(&mut self) -> io::Result<()> {
         if !self.is_journal_header_valid()? {
-            log::info!("[database] rollback: db = {}", self.name());
+            log::info!("[database] rollback: db = {}", self.name);
             self.dirty_pages.clear();
             return Ok(());
         };
@@ -396,5 +393,50 @@ impl Database {
         fs::remove_file(&ltx_path)?;
 
         Ok(checksum)
+    }
+
+    pub(crate) fn needs_sync(&self) -> bool {
+        let elapsed = match self.last_sync_at.elapsed() {
+            Ok(dur) => dur,
+            Err(err) => {
+                log::warn!(
+                    "[database] sync: db = {}, clock drift = {:?}, skipping sync",
+                    self.name,
+                    err
+                );
+                return false;
+            }
+        };
+
+        !self.sync_period.is_zero() && elapsed > self.sync_period
+    }
+
+    pub(crate) fn sync(&mut self) -> io::Result<()> {
+        let pos = match self.client.sync(&self.name, self.pos) {
+            // New database, never written to, just skip the sync
+            Err(lfsc::Error::Lfsc(err)) if err.code == "ENODB" => return Ok(()),
+            Err(x) => return Err(x.into()),
+
+            // All pages have changed, clear the cache completely
+            Ok(lfsc::Changes::All(pos)) => {
+                self.pager.clear(&self.name)?;
+                pos
+            }
+
+            // Some pages have changed, drop them from the cache
+            Ok(lfsc::Changes::Pages(pos, Some(pgnos))) => {
+                for pgno in pgnos {
+                    self.pager.del_page(&self.name, pgno)?;
+                }
+                pos
+            }
+
+            // No changes
+            Ok(lfsc::Changes::Pages(pos, None)) => pos,
+        };
+
+        self.pos = Some(pos);
+
+        Ok(())
     }
 }

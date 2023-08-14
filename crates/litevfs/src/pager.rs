@@ -195,6 +195,19 @@ impl Pager {
         }
     }
 
+    /// Removes all pages of a database.
+    pub(crate) fn clear(&self, db: &str) -> io::Result<()> {
+        log::debug!("[pager] clear: db = {}", db);
+
+        match self.clear_inner(db) {
+            Err(err) => {
+                log::warn!("[pager] clear: db = {}: {:?}", db, err);
+                Err(err)
+            }
+            x => x,
+        }
+    }
+
     /// Returns the minimum available space that pager is trying to keep on the FS.
     pub(crate) fn min_available_space(&self) -> u64 {
         self.min_available_space.load(Ordering::Acquire)
@@ -369,7 +382,23 @@ impl Pager {
 
         for entry in fs::read_dir(&self.pages_path(db))? {
             let entry = entry?;
-            if entry.file_name() <= fname {
+            if !entry.file_type()?.is_file() || entry.file_name() <= fname {
+                continue;
+            }
+
+            remove_file(entry.path())?;
+
+            let rpgno = ltx::PageNum::try_from(Path::new(&entry.file_name()))?;
+            self.lru.lock().unwrap().remove(&self.cache_key(db, rpgno));
+        }
+
+        Ok(())
+    }
+
+    fn clear_inner(&self, db: &str) -> io::Result<()> {
+        for entry in fs::read_dir(&self.pages_path(db))? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
                 continue;
             }
 

@@ -1,5 +1,7 @@
 use std::{collections::HashMap, env, fmt, io, sync};
 
+use crate::PosLogger;
+
 /// All possible errors returned by the LFSC client.
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum Error {
@@ -33,9 +35,9 @@ type Result<T> = std::result::Result<T, Error>;
 
 #[derive(thiserror::Error, Debug)]
 pub(crate) struct LfscError {
-    http_code: u16,
-    code: String,
-    error: String,
+    pub(crate) http_code: u16,
+    pub(crate) code: String,
+    pub(crate) error: String,
 }
 
 impl fmt::Display for LfscError {
@@ -99,6 +101,13 @@ impl AsRef<[u8]> for Page {
     fn as_ref(&self) -> &[u8] {
         &self.data
     }
+}
+
+/// A set of pages changed since previously known state.
+#[derive(Debug)]
+pub(crate) enum Changes {
+    All(ltx::Pos),
+    Pages(ltx::Pos, Option<Vec<ltx::PageNum>>),
 }
 
 impl Client {
@@ -230,6 +239,34 @@ impl Client {
         let resp = self.process_response(req.call())?;
 
         Ok(resp.into_json()?)
+    }
+
+    pub(crate) fn sync(&self, db: &str, pos: Option<ltx::Pos>) -> Result<Changes> {
+        log::debug!("[lfsc] sync: db = {}, pos = {}", db, PosLogger(&pos));
+
+        let mut u = self.host.clone();
+        u.set_path("/db/sync");
+        u.query_pairs_mut().append_pair("db", db);
+        if let Some(pos) = pos {
+            u.query_pairs_mut().append_pair("pos", &pos.to_string());
+        }
+
+        #[derive(serde::Deserialize)]
+        struct SyncResponse {
+            pos: ltx::Pos,
+            pgnos: Option<Vec<ltx::PageNum>>,
+            all: Option<bool>,
+        }
+
+        let req = self.make_request("GET", u);
+        let resp = self.process_response(req.call())?;
+
+        let resp = resp.into_json::<SyncResponse>()?;
+
+        match resp.all {
+            Some(true) => Ok(Changes::All(resp.pos)),
+            _ => Ok(Changes::Pages(resp.pos, resp.pgnos)),
+        }
     }
 
     fn make_request(&self, method: &str, mut u: url::Url) -> ureq::Request {
