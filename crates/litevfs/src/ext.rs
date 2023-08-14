@@ -7,7 +7,7 @@ fn prepare() -> Result<(lfsc::Client, String), Box<dyn std::error::Error + 'stat
     let client = lfsc::Client::from_env()?;
 
     let cache_dir = env::var("LITEVFS_CACHE_DIR").unwrap_or(format!(
-        "litevfs-{}-{}",
+        "/tmp/litevfs-{}-{}",
         process::id(),
         Alphanumeric.sample_string(&mut rand::thread_rng(), 8)
     ));
