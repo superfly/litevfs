@@ -2,7 +2,7 @@ use crate::{
     lfsc,
     locks::{ConnLock, VfsLock},
     pager::{PageRef, Pager},
-    PosLogger,
+    PageNumLogger, PosLogger,
 };
 use sqlite_vfs::OpenAccess;
 use std::{
@@ -419,12 +419,25 @@ impl Database {
 
             // All pages have changed, clear the cache completely
             Ok(lfsc::Changes::All(pos)) => {
+                log::debug!(
+                    "[database] sync: db = {}, prev_pos = {}, pos = {}, all pages have changed",
+                    self.name,
+                    PosLogger(&self.pos),
+                    pos
+                );
                 self.pager.clear(&self.name)?;
                 pos
             }
 
             // Some pages have changed, drop them from the cache
             Ok(lfsc::Changes::Pages(pos, Some(pgnos))) => {
+                log::debug!(
+                    "[database] sync: db = {}, prev_pos = {}, pos = {}, pages = {}",
+                    self.name,
+                    PosLogger(&self.pos),
+                    pos,
+                    PageNumLogger(&pgnos)
+                );
                 for pgno in pgnos {
                     self.pager.del_page(&self.name, pgno)?;
                 }
@@ -432,9 +445,18 @@ impl Database {
             }
 
             // No changes
-            Ok(lfsc::Changes::Pages(pos, None)) => pos,
+            Ok(lfsc::Changes::Pages(pos, None)) => {
+                log::debug!(
+                    "[database] sync: db = {}, prev_pos = {}, pos = {}, no changes",
+                    self.name,
+                    PosLogger(&self.pos),
+                    pos
+                );
+                pos
+            }
         };
 
+        self.last_sync_at = time::SystemTime::now();
         self.pos = Some(pos);
 
         Ok(())

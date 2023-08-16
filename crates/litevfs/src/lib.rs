@@ -26,3 +26,19 @@ impl<'a> fmt::Display for PosLogger<'a> {
         }
     }
 }
+
+struct PageNumLogger<'a>(&'a [ltx::PageNum]);
+
+impl<'a> fmt::Display for PageNumLogger<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+        write!(f, "[")?;
+        for (i, pgno) in self.0.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{}", pgno)?;
+        }
+
+        write!(f, "]")
+    }
+}
