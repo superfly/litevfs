@@ -531,7 +531,7 @@ impl DatabaseHandle for LiteJournalHandle {
         {
             let mut db = self.database.write().unwrap();
             if offset == 0 && buf.len() >= JOURNAL_HDR_SIZE && db.page_size().is_err() {
-                db.set_page_size(Database::parse_page_size_journal(buf)?);
+                db.page_size = Some(Database::parse_page_size_journal(buf)?);
             };
             if offset == 0 && buf.len() == JOURNAL_HDR_SIZE && buf.iter().all(|&b| b == 0) {
                 db.commit_journal()?;

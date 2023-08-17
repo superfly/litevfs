@@ -122,7 +122,9 @@ pub(crate) struct Database {
     pager: Arc<Pager>,
     ltx_path: PathBuf,
     pub(crate) journal_path: PathBuf,
-    page_size: Option<ltx::PageSize>,
+    pub(crate) page_size: Option<ltx::PageSize>,
+    committed_db_size: Option<ltx::PageNum>,
+    current_db_size: Option<ltx::PageNum>,
     pos: Option<ltx::Pos>,
     dirty_pages: BTreeMap<ltx::PageNum, Option<ltx::Checksum>>,
     // XXX: we need to use real time here, as monotonic clock may not be adjusted between suspends
@@ -143,9 +145,12 @@ impl Database {
         pager.prepare_db(name)?;
         fs::create_dir_all(&ltx_path)?;
 
-        let page_size = match pager.get_page(name, pos, ltx::PageNum::ONE) {
-            Ok(page) => Some(Database::parse_page_size_database(page.as_ref())?),
-            Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => None,
+        let (page_size, commit) = match pager.get_page(name, pos, ltx::PageNum::ONE) {
+            Ok(page) => (
+                Some(Database::parse_page_size_database(page.as_ref())?),
+                Some(Database::parse_commit_database(page.as_ref())?),
+            ),
+            Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => (None, None),
             Err(err) => return Err(err),
         };
 
@@ -157,6 +162,8 @@ impl Database {
             ltx_path,
             journal_path,
             page_size,
+            committed_db_size: commit,
+            current_db_size: commit,
             pos,
             dirty_pages: BTreeMap::new(),
             last_sync_at: time::SystemTime::now(),
@@ -177,6 +184,16 @@ impl Database {
         ltx::PageSize::new(page_size).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
+    fn parse_commit_database(page1: &[u8]) -> io::Result<ltx::PageNum> {
+        let commit = u32::from_be_bytes(
+            page1[28..32]
+                .try_into()
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+        );
+
+        ltx::PageNum::new(commit).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    }
+
     pub(crate) fn parse_page_size_journal(hdr: &[u8]) -> io::Result<ltx::PageSize> {
         let page_size = u32::from_be_bytes(
             hdr[24..28]
@@ -194,10 +211,6 @@ impl Database {
     pub(crate) fn page_size(&self) -> io::Result<ltx::PageSize> {
         self.page_size
             .ok_or(io::Error::new(io::ErrorKind::Other, "page size unknown"))
-    }
-
-    pub(crate) fn set_page_size(&mut self, ps: ltx::PageSize) {
-        self.page_size = Some(ps)
     }
 
     fn ensure_aligned(&self, buf: &[u8], offset: u64) -> io::Result<()> {
@@ -228,15 +241,13 @@ impl Database {
     }
 
     pub(crate) fn size(&self) -> io::Result<u64> {
-        // TODO: cache commit value?
-        let page1 = match self.pager.get_page(&self.name, self.pos, ltx::PageNum::ONE) {
-            Ok(page1) => page1,
-            Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => return Ok(0),
-            Err(err) => return Err(err),
+        let commit = if let Some(commit) = self.current_db_size {
+            commit
+        } else {
+            return Ok(0);
         };
-        let num_pages = u32::from_be_bytes(page1.as_ref()[28..32].try_into().unwrap());
 
-        Ok(self.page_size()?.into_inner() as u64 * num_pages as u64)
+        Ok(self.page_size()?.into_inner() as u64 * commit.into_inner() as u64)
     }
 
     pub(crate) fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
@@ -254,8 +265,11 @@ impl Database {
     }
 
     pub(crate) fn write_at(&mut self, buf: &[u8], offset: u64) -> io::Result<()> {
-        if self.page_size().is_err() && offset == 0 && buf.len() >= (SQLITE_HEADER_SIZE as usize) {
-            self.set_page_size(Database::parse_page_size_database(buf)?);
+        if offset == 0 && buf.len() >= (SQLITE_HEADER_SIZE as usize) {
+            if self.page_size().is_err() {
+                self.page_size = Some(Database::parse_page_size_database(buf)?);
+            }
+            self.current_db_size = Some(Database::parse_commit_database(buf)?);
         }
 
         self.ensure_aligned(buf, offset)?;
@@ -329,6 +343,7 @@ impl Database {
             }
         };
 
+        self.committed_db_size = self.current_db_size;
         self.dirty_pages.clear();
         let pos = ltx::Pos {
             txid,
@@ -341,13 +356,10 @@ impl Database {
     }
 
     fn commit_journal_inner(&mut self, txid: ltx::TXID) -> io::Result<ltx::Checksum> {
-        let page1 = self
-            .pager
-            .get_page(&self.name, self.pos, ltx::PageNum::ONE)?;
-        let commit = ltx::PageNum::new(u32::from_be_bytes(
-            page1.as_ref()[28..32].try_into().unwrap(),
+        let commit = self.current_db_size.ok_or(io::Error::new(
+            io::ErrorKind::Other,
+            "database size unknown",
         ))?;
-
         let ltx_path = self.ltx_path.join(format!("{0}-{0}.ltx", txid));
         let mut file = fs::OpenOptions::new()
             .read(true)
