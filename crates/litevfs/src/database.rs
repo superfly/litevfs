@@ -385,6 +385,17 @@ impl Database {
     }
 
     fn commit_journal_inner(&mut self, txid: ltx::TXID) -> io::Result<ltx::Checksum> {
+        if self.current_db_size < self.committed_db_size {
+            log::warn!(
+                "[database] commit_journal: db = {}: VACUUM is not supported by LiteVFS",
+                self.name
+            );
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "vacuum is not supported by LiteVFS",
+            ));
+        }
+
         let commit = self.current_db_size.ok_or(io::Error::new(
             io::ErrorKind::Other,
             "database size unknown",
