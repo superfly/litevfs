@@ -457,6 +457,10 @@ impl DatabaseHandle for LiteDatabaseHandle {
                     "WAL is not supported by LiteVFS",
                 )))
             }
+            ("auto_vacuum", _) | ("incremental_vacuum", _) => Some(Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "autovacuum is not supported by LiteVFS",
+            ))),
             ("litevfs_min_available_space", None) => Some(Ok(Some(
                 ByteSize::b(self.pager.min_available_space()).to_string_as(true),
             ))),
