@@ -146,10 +146,13 @@ impl Database {
         fs::create_dir_all(&ltx_path)?;
 
         let (page_size, commit) = match pager.get_page(name, pos, ltx::PageNum::ONE) {
-            Ok(page) => (
-                Some(Database::parse_page_size_database(page.as_ref())?),
-                Some(Database::parse_commit_database(page.as_ref())?),
-            ),
+            Ok(page) => {
+                Database::ensure_supported(page.as_ref())?;
+                (
+                    Some(Database::parse_page_size_database(page.as_ref())?),
+                    Some(Database::parse_commit_database(page.as_ref())?),
+                )
+            }
             Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => (None, None),
             Err(err) => return Err(err),
         };
@@ -169,6 +172,32 @@ impl Database {
             last_sync_at: time::SystemTime::now(),
             sync_period: time::Duration::from_secs(1),
         })
+    }
+
+    fn ensure_supported(page1: &[u8]) -> io::Result<()> {
+        let write_version = u8::from_be(page1[18]);
+        let read_version = u8::from_be(page1[19]);
+        let auto_vacuum = u32::from_be_bytes(
+            page1[52..56]
+                .try_into()
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+        );
+
+        if write_version == 2 || read_version == 2 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "WAL is not supported by LiteVFS",
+            ));
+        }
+
+        if auto_vacuum > 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "autovacuum is not supported by LiteVFS",
+            ));
+        }
+
+        Ok(())
     }
 
     fn parse_page_size_database(page1: &[u8]) -> io::Result<ltx::PageSize> {
