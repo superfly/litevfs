@@ -6,7 +6,8 @@ use sqlite_vfs::CodeError;
 use std::{
     ffi, fs,
     io::{self, Read, Write},
-    os::unix::prelude::FileExt,
+    mem,
+    os::unix::prelude::{FileExt, OsStrExt},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -432,7 +433,7 @@ impl Pager {
 
         loop {
             let pages = self.lru.lock().unwrap().len();
-            let space = fs2::available_space(&self.root)?;
+            let space = statvfs(&self.root)?.available_space;
 
             log::trace!(
                 "[pager] reclaim_space: pages = {}, max_pages = {}, space = {}, min_space = {}",
@@ -540,5 +541,35 @@ fn remove_file<P: AsRef<Path>>(file: P) -> io::Result<()> {
     match fs::remove_file(file) {
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
         x => x,
+    }
+}
+
+struct FsStats {
+    available_space: u64,
+}
+
+fn statvfs<P>(path: P) -> io::Result<FsStats>
+where
+    P: AsRef<Path>,
+{
+    let cstr = match ffi::CString::new(path.as_ref().as_os_str().as_bytes()) {
+        Ok(cstr) => cstr,
+        Err(..) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "path contained a null",
+            ))
+        }
+    };
+
+    unsafe {
+        let mut stat: libc::statvfs = mem::zeroed();
+        if libc::statvfs(cstr.as_ptr() as *const _, &mut stat) != 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(FsStats {
+                available_space: stat.f_frsize as u64 * stat.f_bavail as u64,
+            })
+        }
     }
 }

@@ -216,16 +216,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fs2"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
-dependencies = [
- "libc",
- "winapi",
-]
-
-[[package]]
 name = "getrandom"
 version = "0.2.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -358,9 +348,9 @@ dependencies = [
  "bytesize",
  "caches",
  "env_logger",
- "fs2",
  "hex",
  "humantime",
+ "libc",
  "log",
  "ltx",
  "rand",
