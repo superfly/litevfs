@@ -6,7 +6,7 @@ use crate::PosLogger;
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum Error {
     #[error("transport level: {0}")]
-    Transport(Box<ureq::Transport>),
+    Transport(String),
     #[error("ltx position mismatch: {0}")]
     PosMismatch(ltx::Pos),
     #[error("LFSC: {0}")]
@@ -174,12 +174,10 @@ impl Client {
         let mut u = self.host.clone();
         u.set_path("/pos");
 
-        let req = self.make_request("GET", u);
-        let resp = self.process_response(req.call())?;
-
-        Ok(resp.into_json()?)
+        self.call("GET", u)
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn write_tx(&self, db: &str, ltx: impl io::Read, ltx_len: u64) -> Result<()> {
         log::debug!("[lfsc] write_tx: db = {}", db);
 
@@ -196,6 +194,11 @@ impl Client {
         io::copy(&mut resp.into_reader(), &mut io::sink()).ok();
 
         Ok(())
+    }
+
+    #[cfg(any(target_os = "emscripten"))]
+    pub(crate) fn write_tx(&self, db: &str, ltx: impl io::Read, ltx_len: u64) -> Result<()> {
+        return Err(io::Error::new(io::ErrorKind::Other, "not implemented").into());
     }
 
     pub(crate) fn get_page(
@@ -223,10 +226,7 @@ impl Client {
             .append_pair("pos", &pos.to_string())
             .append_pair("pgno", &pgno.to_string());
 
-        let req = self.make_request("GET", u);
-        let resp = self.process_response(req.call())?;
-
-        Ok(resp.into_json::<GetPageResponse>()?.pages)
+        Ok(self.call::<GetPageResponse>("GET", u)?.pages)
     }
 
     pub(crate) fn info(&self) -> Result<Info> {
@@ -235,10 +235,7 @@ impl Client {
         let mut u = self.host.clone();
         u.set_path("/info");
 
-        let req = self.make_request("GET", u);
-        let resp = self.process_response(req.call())?;
-
-        Ok(resp.into_json()?)
+        self.call("GET", u)
     }
 
     pub(crate) fn sync(&self, db: &str, pos: Option<ltx::Pos>) -> Result<Changes> {
@@ -258,10 +255,7 @@ impl Client {
             all: Option<bool>,
         }
 
-        let req = self.make_request("GET", u);
-        let resp = self.process_response(req.call())?;
-
-        let resp = resp.into_json::<SyncResponse>()?;
+        let resp = self.call::<SyncResponse>("GET", u)?;
 
         match resp.all {
             Some(true) => Ok(Changes::All(resp.pos)),
@@ -269,6 +263,18 @@ impl Client {
         }
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn call<R>(&self, method: &str, u: url::Url) -> Result<R>
+    where
+        R: serde::de::DeserializeOwned,
+    {
+        let req = self.make_request(method, u);
+        let resp = self.process_response(req.call())?;
+
+        Ok(resp.into_json()?)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn make_request(&self, method: &str, mut u: url::Url) -> ureq::Request {
         if let Some(ref cluster) = self.cluster {
             u.query_pairs_mut().append_pair("cluster", cluster);
@@ -288,6 +294,7 @@ impl Client {
         req
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn process_response(
         &self,
         resp: std::result::Result<ureq::Response, ureq::Error>,
@@ -301,7 +308,7 @@ impl Client {
 
                 Ok(resp)
             }
-            Err(ureq::Error::Transport(err)) => Err(Error::Transport(Box::new(err))),
+            Err(ureq::Error::Transport(err)) => Err(Error::Transport(err.to_string())),
             Err(ureq::Error::Status(code, body)) => {
                 let repr: LfscErrorRepr = body.into_json()?;
                 match repr.pos {
@@ -314,6 +321,14 @@ impl Client {
                 }
             }
         }
+    }
+
+    #[cfg(any(target_os = "emscripten"))]
+    fn call<R>(&self, method: &str, u: url::Url) -> Result<R>
+    where
+        R: serde::de::DeserializeOwned,
+    {
+        return Err(io::Error::new(io::ErrorKind::Other, "not implemented").into());
     }
 }
 

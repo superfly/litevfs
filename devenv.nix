@@ -26,4 +26,9 @@ in {
     clippy.enable = true;
     rustfmt.enable = true;
   };
+
+  env = {
+    EMCC_CFLAGS = "--no-entry";
+    EM_CACHE = "/tmp/emcache";
+  };
 }

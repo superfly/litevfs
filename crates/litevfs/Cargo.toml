@@ -21,8 +21,10 @@ serde_with = { version = "3.2", features = ["base64", "macros"] }
 string-interner = "0.14"
 sqlite-vfs = { path = "../sqlite-vfs", features = ["syscall", "loadext"] }
 thiserror = "1.0"
-ureq = { version = "2.7", features = ["json"] }
 url = "2.4"
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+ureq = { version = "2.7", features = ["json"] }
 
 [dev-dependencies]
 serde_test = "1.0"
