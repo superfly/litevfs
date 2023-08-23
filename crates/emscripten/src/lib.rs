@@ -60,7 +60,7 @@ pub fn get(u: url::Url, headers: HashMap<&str, String>) -> Result<Response, Erro
         let mut headers_u_copy = headers_u;
 
         let mut headers = HashMap::new();
-        while (*headers_u_copy).is_null() {
+        while !(*headers_u_copy).is_null() {
             let k = *headers_u_copy;
             headers_u_copy = headers_u_copy.add(1);
             let v = *headers_u_copy;
