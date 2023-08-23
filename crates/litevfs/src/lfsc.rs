@@ -364,7 +364,18 @@ impl Client {
         resp: std::result::Result<emscripten::Response<'b>, emscripten::Error>,
     ) -> Result<emscripten::Response<'b>> {
         match resp {
-            Ok(resp) => Ok(resp),
+            Ok(resp) => {
+                log::info!("all headers = {:?}", resp.headers);
+                let mut instance_id = self.instance_id.write().unwrap();
+                if instance_id.as_deref()
+                    != resp.headers.get("lfsc-instance-id").map(|x| x.as_str())
+                {
+                    *instance_id = resp.headers.get("lfsc-instance-id").map(Into::into);
+                    log::warn!("got new instance id {:?}", *instance_id);
+                }
+
+                Ok(resp)
+            }
             Err(emscripten::Error::IO(err)) => Err(Error::Transport(err.to_string())),
             Err(emscripten::Error::Status(code, resp)) => {
                 let repr: LfscErrorRepr = serde_json::from_slice(resp.body)?;

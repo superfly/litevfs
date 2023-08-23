@@ -1,6 +1,7 @@
 #[allow(clippy::all, non_snake_case, non_camel_case_types, dead_code)]
 mod ffi;
 
+use std::ffi::CStr;
 use std::slice;
 use std::{
     collections::HashMap,
@@ -9,8 +10,6 @@ use std::{
     mem::MaybeUninit,
     ptr,
 };
-
-use ffi::emscripten_fetch;
 
 pub fn get(u: url::Url, headers: HashMap<&str, String>) -> Result<Response, Error> {
     let u = CString::new(Into::<String>::into(u))
@@ -48,15 +47,40 @@ pub fn get(u: url::Url, headers: HashMap<&str, String>) -> Result<Response, Erro
             | ffi::EMSCRIPTEN_FETCH_REPLACE;
         attr.requestHeaders = headers_c.as_ptr();
 
-        let fetch = emscripten_fetch(
+        let fetch = ffi::emscripten_fetch(
             &mut attr as *mut ffi::emscripten_fetch_attr_t,
             u.as_ptr() as *const i8,
         );
+
+        let headers_length = ffi::emscripten_fetch_get_response_headers_length(fetch);
+        let mut headers_s: Vec<std::ffi::c_char> = vec![0; headers_length + 1];
+        let headers_c = headers_s.as_mut_ptr();
+        ffi::emscripten_fetch_get_response_headers(fetch, headers_c, headers_s.len());
+        let headers_u = ffi::emscripten_fetch_unpack_response_headers(headers_c);
+        let mut headers_u_copy = headers_u;
+
+        let mut headers = HashMap::new();
+        while (*headers_u_copy).is_null() {
+            let k = *headers_u_copy;
+            headers_u_copy = headers_u_copy.add(1);
+            let v = *headers_u_copy;
+            headers_u_copy = headers_u_copy.add(1);
+
+            let k = CStr::from_ptr(k);
+            let v = CStr::from_ptr(v);
+
+            headers.insert(
+                k.to_string_lossy().into_owned().to_lowercase(),
+                v.to_string_lossy().trim().to_owned(),
+            );
+        }
+        ffi::emscripten_fetch_free_unpacked_response_headers(headers_u);
 
         let status = (*fetch).status;
         let resp = Response {
             fetch,
             body: slice::from_raw_parts((*fetch).data as *const u8, (*fetch).numBytes as usize),
+            headers,
         };
 
         match status {
@@ -69,6 +93,7 @@ pub fn get(u: url::Url, headers: HashMap<&str, String>) -> Result<Response, Erro
 pub struct Response<'a> {
     fetch: *mut ffi::emscripten_fetch_t,
     pub body: &'a [u8],
+    pub headers: HashMap<String, String>,
 }
 
 impl<'a> Drop for Response<'a> {
