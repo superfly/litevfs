@@ -176,6 +176,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "emscripten"
+version = "0.1.0"
+dependencies = [
+ "url",
+]
+
+[[package]]
 name = "env_logger"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -347,6 +354,7 @@ version = "0.1.0"
 dependencies = [
  "bytesize",
  "caches",
+ "emscripten",
  "env_logger",
  "hex",
  "humantime",
@@ -355,6 +363,7 @@ dependencies = [
  "ltx",
  "rand",
  "serde",
+ "serde_json",
  "serde_test",
  "serde_with",
  "sqlite-vfs",

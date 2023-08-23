@@ -17,18 +17,18 @@ log = "0.4"
 ltx = { git = "ssh://git@github.com/superfly/ltx-rs.git", branch = "main" }
 rand = "0.8"
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 serde_with = { version = "3.2", features = ["base64", "macros"] }
 string-interner = "0.14"
 sqlite-vfs = { path = "../sqlite-vfs", features = ["syscall", "loadext"] }
 thiserror = "1.0"
 url = "2.4"
 
-[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
 ureq = { version = "2.7", features = ["json"] }
+
+[target.'cfg(target_os = "emscripten")'.dependencies]
+emscripten = { path = "../emscripten" }
 
 [dev-dependencies]
 serde_test = "1.0"
-
-[features]
-# linkable = ["sqlite-vfs/faultinj"]
-linkable = []
