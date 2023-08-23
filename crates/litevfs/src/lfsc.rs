@@ -11,7 +11,7 @@ pub(crate) enum Error {
     PosMismatch(ltx::Pos),
     #[error("LFSC: {0}")]
     Lfsc(LfscError),
-    #[error("body")]
+    #[error("body: {0}")]
     Body(#[from] io::Error),
     #[error("environment: {0}")]
     Env(String),
@@ -28,6 +28,12 @@ impl From<Error> for io::Error {
             Error::Body(e) => e,
             Error::Env(s) => io::Error::new(io::ErrorKind::Other, s),
         }
+    }
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(e: serde_json::Error) -> Self {
+        Error::Body(io::Error::new(io::ErrorKind::InvalidData, e))
     }
 }
 
@@ -177,7 +183,7 @@ impl Client {
         self.call("GET", u)
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(not(target_os = "emscripten"))]
     pub(crate) fn write_tx(&self, db: &str, ltx: impl io::Read, ltx_len: u64) -> Result<()> {
         log::debug!("[lfsc] write_tx: db = {}", db);
 
@@ -197,7 +203,7 @@ impl Client {
     }
 
     #[cfg(any(target_os = "emscripten"))]
-    pub(crate) fn write_tx(&self, db: &str, ltx: impl io::Read, ltx_len: u64) -> Result<()> {
+    pub(crate) fn write_tx(&self, _db: &str, _ltx: impl io::Read, _ltx_len: u64) -> Result<()> {
         return Err(io::Error::new(io::ErrorKind::Other, "not implemented").into());
     }
 
@@ -263,7 +269,7 @@ impl Client {
         }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(not(target_os = "emscripten"))]
     fn call<R>(&self, method: &str, u: url::Url) -> Result<R>
     where
         R: serde::de::DeserializeOwned,
@@ -274,7 +280,7 @@ impl Client {
         Ok(resp.into_json()?)
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(not(target_os = "emscripten"))]
     fn make_request(&self, method: &str, mut u: url::Url) -> ureq::Request {
         if let Some(ref cluster) = self.cluster {
             u.query_pairs_mut().append_pair("cluster", cluster);
@@ -294,7 +300,7 @@ impl Client {
         req
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(not(target_os = "emscripten"))]
     fn process_response(
         &self,
         resp: std::result::Result<ureq::Response, ureq::Error>,
@@ -324,11 +330,54 @@ impl Client {
     }
 
     #[cfg(any(target_os = "emscripten"))]
-    fn call<R>(&self, method: &str, u: url::Url) -> Result<R>
+    fn call<R>(&self, method: &str, mut u: url::Url) -> Result<R>
     where
         R: serde::de::DeserializeOwned,
     {
-        return Err(io::Error::new(io::ErrorKind::Other, "not implemented").into());
+        if let Some(ref cluster) = self.cluster {
+            u.query_pairs_mut().append_pair("cluster", cluster);
+        }
+
+        let mut headers = HashMap::new();
+        if let Some(ref token) = self.token {
+            headers.insert("Authorization", token.into());
+        }
+        if let Some(instance_id) = self.instance_id.read().unwrap().as_deref() {
+            headers.insert("fly-force-instance-id", instance_id.into());
+        }
+        if let Some(ref cluster_id) = self.cluster_id {
+            headers.insert("Litefs-Cluster-Id", cluster_id.into());
+        }
+
+        match method {
+            "GET" => {
+                let resp = self.process_response(emscripten::get(u, headers))?;
+                Ok(serde_json::from_slice(resp.body)?)
+            }
+            _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "Method not supported").into()),
+        }
+    }
+
+    #[cfg(target_os = "emscripten")]
+    fn process_response<'a, 'b>(
+        &'b self,
+        resp: std::result::Result<emscripten::Response<'b>, emscripten::Error>,
+    ) -> Result<emscripten::Response<'b>> {
+        match resp {
+            Ok(resp) => Ok(resp),
+            Err(emscripten::Error::IO(err)) => Err(Error::Transport(err.to_string())),
+            Err(emscripten::Error::Status(code, resp)) => {
+                let repr: LfscErrorRepr = serde_json::from_slice(resp.body)?;
+                match repr.pos {
+                    Some(pos) if repr.code == "EPOSMISMATCH" => Err(Error::PosMismatch(pos)),
+                    _ => Err(Error::Lfsc(LfscError {
+                        http_code: code,
+                        code: repr.code,
+                        error: repr.error,
+                    })),
+                }
+            }
+        }
     }
 }
 

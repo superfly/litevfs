@@ -17,7 +17,7 @@ fn prepare() -> Result<(lfsc::Client, String), Box<dyn std::error::Error + 'stat
 }
 
 #[no_mangle]
-#[cfg(not(feature = "linkable"))]
+#[cfg(not(target_os = "emscripten"))]
 #[allow(non_snake_case)]
 pub extern "C" fn sqlite3_litevfs_init(
     _db: *mut ffi::sqlite3,
@@ -61,8 +61,8 @@ pub extern "C" fn sqlite3_litevfs_init(
 }
 
 #[no_mangle]
-#[cfg(feature = "linkable")]
-pub extern "C" fn sqlite3_litevfs_init(_unused: *const std::ffi::c_char) -> i32 {
+#[cfg(target_os = "emscripten")]
+pub extern "C" fn sqlite3_wasm_extra_init(_unused: *const std::ffi::c_char) -> std::ffi::c_int {
     env_logger::try_init().ok();
 
     log::info!("registering LiteVFS");

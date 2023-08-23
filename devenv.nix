@@ -17,6 +17,7 @@ in {
 
   packages = [
     pkgs.emscripten
+    pkgs.wabt
     pkgs.cargo-nextest
     pkgs.rust-bindgen
   ];
