@@ -568,7 +568,8 @@ where
             Err(io::Error::last_os_error())
         } else {
             Ok(FsStats {
-                available_space: stat.f_frsize * stat.f_bavail,
+                #[allow(clippy::unnecessary_cast)]
+                available_space: stat.f_frsize as u64 * stat.f_bavail as u64,
             })
         }
     }
