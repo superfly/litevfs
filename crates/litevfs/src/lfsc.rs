@@ -202,7 +202,7 @@ impl Client {
         Ok(())
     }
 
-    #[cfg(any(target_os = "emscripten"))]
+    #[cfg(target_os = "emscripten")]
     pub(crate) fn write_tx(&self, _db: &str, _ltx: impl io::Read, _ltx_len: u64) -> Result<()> {
         return Err(io::Error::new(io::ErrorKind::Other, "not implemented").into());
     }
@@ -329,7 +329,7 @@ impl Client {
         }
     }
 
-    #[cfg(any(target_os = "emscripten"))]
+    #[cfg(target_os = "emscripten")]
     fn call<R>(&self, method: &str, mut u: url::Url) -> Result<R>
     where
         R: serde::de::DeserializeOwned,

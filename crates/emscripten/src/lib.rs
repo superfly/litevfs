@@ -53,7 +53,7 @@ pub fn get(u: url::Url, headers: HashMap<&str, String>) -> Result<Response, Erro
             u.as_ptr() as *const i8,
         );
 
-        let status = (*fetch).status as u16;
+        let status = (*fetch).status;
         let resp = Response {
             fetch,
             body: slice::from_raw_parts((*fetch).data as *const u8, (*fetch).numBytes as usize),
