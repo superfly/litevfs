@@ -807,7 +807,7 @@ mod vfs {
     ) -> c_int {
         log::trace!("randomness");
 
-        let bytes = slice::from_raw_parts_mut(z_buf_out as *mut i8, n_byte as usize);
+        let bytes = slice::from_raw_parts_mut(z_buf_out, n_byte as usize);
         let state = match vfs_state::<V>(p_vfs) {
             Ok(state) => state,
             Err(_) => return 0,
