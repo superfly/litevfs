@@ -303,6 +303,13 @@ impl Database {
 
         self.ensure_aligned(buf, offset)?;
         let page_num = self.page_num_for(offset)?;
+
+        let orig_checksum = match self.pager.get_page(&self.name, self.pos, page_num) {
+            Ok(page) => Some(page.checksum()),
+            Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => None,
+            Err(err) => return Err(err),
+        };
+
         let page = PageRef::new(page_num, buf);
         self.pager.put_page(&self.name, page)?;
 
@@ -310,14 +317,9 @@ impl Database {
             return Ok(());
         }
 
-        let current_checksum = match self.pager.get_page(&self.name, self.pos, page_num) {
-            Ok(page) => Some(page.checksum()),
-            Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => None,
-            Err(err) => return Err(err),
-        };
         self.dirty_pages
             .entry(page.number())
-            .or_insert(current_checksum);
+            .or_insert(orig_checksum);
 
         Ok(())
     }
