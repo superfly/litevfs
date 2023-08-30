@@ -1,5 +1,6 @@
 use crate::{
     database::{Database, DatabaseManager},
+    leaser::Leaser,
     lfsc,
     locks::{ConnLock, VfsLock},
     pager::Pager,
@@ -163,11 +164,12 @@ impl LiteVfs {
     pub(crate) fn new<P: AsRef<Path>>(path: P, client: lfsc::Client) -> Self {
         let client = Arc::new(client);
         let pager = Arc::new(Pager::new(&path, Arc::clone(&client)));
+        let leaser = Leaser::new(Arc::clone(&client), time::Duration::from_secs(1));
 
         LiteVfs {
             path: path.as_ref().to_path_buf(),
             pager: Arc::clone(&pager),
-            database_manager: Mutex::new(DatabaseManager::new(pager, client)),
+            database_manager: Mutex::new(DatabaseManager::new(pager, client, leaser)),
             temp_counter: AtomicU64::new(0),
         }
     }
@@ -212,7 +214,7 @@ pub trait DatabaseHandle: Sync {
     }
 
     fn handle_type(&self) -> &'static str;
-    fn handle_name(&self) -> String;
+    fn handle_name(&self) -> &str;
 }
 
 pub struct LiteHandle {
@@ -361,15 +363,91 @@ struct LiteDatabaseHandle {
     pager: Arc<Pager>,
     database: Arc<RwLock<Database>>,
     lock: ConnLock,
+    name: String,
 }
 
 impl LiteDatabaseHandle {
     pub(crate) fn new(pager: Arc<Pager>, database: Arc<RwLock<Database>>, lock: ConnLock) -> Self {
+        let name = database.read().unwrap().name.clone();
         LiteDatabaseHandle {
             pager,
             database,
             lock,
+            name,
         }
+    }
+
+    fn acquire_exclusive(&mut self) -> io::Result<()> {
+        if self.lock.state() != LockKind::None {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "connection is already holding a lock",
+            ));
+        }
+
+        let now = time::Instant::now();
+        let timeout = time::Duration::from_secs(1);
+        let check_timeout = move || -> io::Result<()> {
+            if now.elapsed() > timeout {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    format!(
+                        "waiting for more than {} to acquire exclusive lock",
+                        format_duration(timeout)
+                    ),
+                ));
+            };
+
+            thread::sleep(time::Duration::from_millis(1));
+
+            Ok(())
+        };
+
+        loop {
+            if self.lock.acquire(LockKind::Shared) {
+                if self.lock.acquire(LockKind::Reserved) {
+                    // Now that we have a reserved lock there can only be readers.
+                    // So loop here until all of them finish.
+                    while !self.lock.acquire(LockKind::Exclusive) {
+                        check_timeout()?;
+                    }
+
+                    return Ok(());
+                } else {
+                    // Return back to none if we can't progress from shared
+                    self.lock.acquire(LockKind::None);
+                }
+            }
+
+            check_timeout()?;
+        }
+    }
+
+    fn release_exclusive(&mut self) {
+        self.lock.acquire(LockKind::None);
+    }
+
+    fn acquire_lease_and_sync(&mut self) -> io::Result<()> {
+        self.acquire_exclusive()?;
+
+        {
+            let mut db = self.database.write().unwrap();
+            if let Err(err) = db.acquire_lease() {
+                drop(db);
+                self.release_exclusive();
+                return Err(err);
+            }
+            if let Err(err) = db.sync() {
+                _ = db.release_lease();
+                drop(db);
+                self.release_exclusive();
+                return Err(err);
+            }
+        };
+
+        self.release_exclusive();
+
+        Ok(())
     }
 }
 
@@ -399,39 +477,23 @@ impl DatabaseHandle for LiteDatabaseHandle {
             // This is a bit complicated. We need to initiate the sync even for read transactions,
             // so there may be concurrent transactions executing at the time we enter `sync()`.
             // So wait for them to finish first, otherwise they might see inconsistent state.
-            let now = time::Instant::now();
-            loop {
-                // We can't hold the database lock for long, as another connection
-                // might be in the middle of RW transaction.
-                {
-                    let mut db = self.database.write().unwrap();
+            if let Err(err) = self.acquire_exclusive() {
+                log::warn!(
+                    "[database] sync: db = {}, timeout waiting for active connections, skipping sync: {:?}",
+                    self.name, err
+                );
 
-                    if now.elapsed() > time::Duration::from_millis(500) {
-                        log::warn!(
-                            "[database] sync: db = {}, timeout waiting for active readers, skipping sync",
-                            db.name,
-                        );
-                        break;
-                    }
-
-                    // There are no readers, try and sync. If we fail, let SQLite take the read lock, we may still be
-                    // able to read the data. The important part here is that `sync()` doesn't fetch any data, so
-                    // the cache stays consistent.
-                    if self.lock.readers() == 0 {
-                        if let Err(err) = db.sync() {
-                            log::warn!("[database] sync: db = {}: {:?}", db.name, err);
-                        }
-                        break;
-                    }
-
-                    log::debug!(
-                        "[database] sync: db = {}, waiting for active readers",
-                        db.name
-                    );
-                }
-
-                thread::sleep(time::Duration::from_millis(5));
+                return self.lock.acquire(lock);
             }
+
+            // There are no readers, try and sync. If we fail, let SQLite take the read lock, we may still be
+            // able to read the data. The important part here is that `sync()` doesn't fetch any data, so
+            // the cache stays consistent.
+            if let Err(err) = self.database.write().unwrap().sync() {
+                log::warn!("[database] sync: db = {}: {:?}", self.name, err);
+            }
+
+            self.release_exclusive();
         }
 
         self.lock.acquire(lock)
@@ -461,6 +523,7 @@ impl DatabaseHandle for LiteDatabaseHandle {
                 io::ErrorKind::InvalidInput,
                 "autovacuum is not supported by LiteVFS",
             ))),
+
             ("litevfs_min_available_space", None) => Some(Ok(Some(
                 ByteSize::b(self.pager.min_available_space()).to_string_as(true),
             ))),
@@ -471,6 +534,7 @@ impl DatabaseHandle for LiteDatabaseHandle {
                 }
                 Err(e) => Some(Err(io::Error::new(io::ErrorKind::InvalidInput, e))),
             },
+
             ("litevfs_max_cached_pages", None) => {
                 Some(Ok(Some(self.pager.max_cached_pages().to_string())))
             }
@@ -481,6 +545,7 @@ impl DatabaseHandle for LiteDatabaseHandle {
                 }
                 Err(e) => Some(Err(io::Error::new(io::ErrorKind::InvalidInput, e))),
             },
+
             ("litevfs_cache_sync_period", None) => Some(Ok(Some(
                 format_duration(self.database.read().unwrap().sync_period).to_string(),
             ))),
@@ -491,6 +556,17 @@ impl DatabaseHandle for LiteDatabaseHandle {
                 }
                 Err(e) => Some(Err(io::Error::new(io::ErrorKind::InvalidInput, e))),
             },
+
+            ("litevfs_acquire_lease", None) => match self.acquire_lease_and_sync() {
+                Ok(()) => Some(Ok(None)),
+                Err(e) => Some(Err(e)),
+            },
+            ("litevfs_release_lease", None) => {
+                match self.database.read().unwrap().release_lease() {
+                    Ok(()) => Some(Ok(None)),
+                    Err(e) => Some(Err(e)),
+                }
+            }
             _ => None,
         }
     }
@@ -498,25 +574,35 @@ impl DatabaseHandle for LiteDatabaseHandle {
     fn handle_type(&self) -> &'static str {
         "database"
     }
-    fn handle_name(&self) -> String {
-        self.database.read().unwrap().name.clone()
+    fn handle_name(&self) -> &str {
+        &self.name
     }
 }
 
 struct LiteJournalHandle {
     journal: fs::File,
     database: Arc<RwLock<Database>>,
+    name: String,
 }
 
 impl LiteJournalHandle {
     pub(crate) fn new(database: Arc<RwLock<Database>>) -> io::Result<Self> {
-        let journal = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(&database.read().unwrap().journal_path)?;
+        let (journal, name) = {
+            let db = database.read().unwrap();
+            let journal = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open(&db.journal_path)?;
+            let name = db.name.clone();
+            (journal, name)
+        };
 
-        Ok(LiteJournalHandle { journal, database })
+        Ok(LiteJournalHandle {
+            journal,
+            database,
+            name,
+        })
     }
 }
 
@@ -553,13 +639,13 @@ impl DatabaseHandle for LiteJournalHandle {
     fn handle_type(&self) -> &'static str {
         "journal"
     }
-    fn handle_name(&self) -> String {
-        self.database.read().unwrap().name.clone()
+    fn handle_name(&self) -> &str {
+        &self.name
     }
 }
 
 struct LiteTempDbHandle {
-    name: PathBuf,
+    name: String,
     file: fs::File,
     lock: ConnLock,
 }
@@ -578,7 +664,7 @@ impl LiteTempDbHandle {
             _ => (),
         };
 
-        let name = path.as_ref().to_path_buf();
+        let name = path.as_ref().to_string_lossy().to_string();
         let file = o.open(path)?;
         let vfs_lock = VfsLock::new();
         let lock = vfs_lock.conn_lock();
@@ -618,7 +704,7 @@ impl DatabaseHandle for LiteTempDbHandle {
     fn handle_type(&self) -> &'static str {
         "tempdb"
     }
-    fn handle_name(&self) -> String {
-        self.name.to_string_lossy().to_string()
+    fn handle_name(&self) -> &str {
+        &self.name
     }
 }

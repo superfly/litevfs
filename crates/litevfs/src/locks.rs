@@ -110,6 +110,7 @@ impl InnerVfsLock {
         }
     }
 
+    #[cfg(test)]
     fn readers(&self) -> usize {
         self.readers
     }
@@ -144,10 +145,6 @@ impl ConnLock {
 
     pub(crate) fn reserved(&self) -> bool {
         self.state >= LockKind::Shared || self.vfs_lock.lock().unwrap().has_writer()
-    }
-
-    pub(crate) fn readers(&self) -> usize {
-        self.vfs_lock.lock().unwrap().readers()
     }
 }
 

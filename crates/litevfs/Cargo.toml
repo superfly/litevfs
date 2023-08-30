@@ -9,6 +9,7 @@ crate-type = ["staticlib", "cdylib"]
 [dependencies]
 bytesize = "1.2"
 caches = "0.2"
+crossbeam-channel = "0.5"
 env_logger = { version = "0.10", default-features = false }
 hex = "0.4"
 humantime = "2.1"
@@ -21,6 +22,7 @@ serde_json = "1.0"
 serde_with = { version = "3.2", features = ["base64", "macros"] }
 string-interner = "0.14"
 sqlite-vfs = { path = "../sqlite-vfs", features = ["syscall", "loadext"] }
+time = { version = "0.3", features = ["std", "macros", "serde", "parsing"] }
 thiserror = "1.0"
 url = "2.4"
 

@@ -116,6 +116,34 @@ pub(crate) enum Changes {
     Pages(ltx::Pos, Option<Vec<ltx::PageNum>>),
 }
 
+#[derive(Debug)]
+pub(crate) enum LeaseOp<'a> {
+    Acquire(std::time::Duration),
+    Refresh(&'a str, std::time::Duration),
+}
+
+impl<'a> fmt::Display for LeaseOp<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::result::Result<(), fmt::Error> {
+        match self {
+            LeaseOp::Acquire(dur) => write!(f, "acquire({}ms)", dur.as_millis()),
+            LeaseOp::Refresh(id, dur) => write!(f, "refresh({}, {}ms", id, dur.as_millis()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+pub(crate) struct Lease {
+    pub(crate) id: String,
+    #[serde(with = "time::serde::rfc3339")]
+    pub(crate) expires_at: time::OffsetDateTime,
+}
+
+impl fmt::Display for Lease {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::result::Result<(), fmt::Error> {
+        write!(f, "{}/{}", self.id, self.expires_at)
+    }
+}
+
 impl Client {
     const CLUSTER_ID_LEN: usize = 20;
     const CLUSTER_ID_PREFIX: &'static str = "LFSC";
@@ -184,7 +212,13 @@ impl Client {
     }
 
     #[cfg(not(target_os = "emscripten"))]
-    pub(crate) fn write_tx(&self, db: &str, ltx: impl io::Read, ltx_len: u64) -> Result<()> {
+    pub(crate) fn write_tx(
+        &self,
+        db: &str,
+        ltx: impl io::Read,
+        ltx_len: u64,
+        lease: &str,
+    ) -> Result<()> {
         log::debug!("[lfsc] write_tx: db = {}", db);
 
         let mut u = self.host.clone();
@@ -193,7 +227,8 @@ impl Client {
 
         let req = self
             .make_request("POST", u)
-            .set("Content-Length", &ltx_len.to_string());
+            .set("Content-Length", &ltx_len.to_string())
+            .set("Lfsc-Lease-Id", lease);
         let resp = self.process_response(req.send(ltx))?;
 
         // consume the body (and ignore any errors) to reuse the connection
@@ -267,6 +302,43 @@ impl Client {
             Some(true) => Ok(Changes::All(resp.pos)),
             _ => Ok(Changes::Pages(resp.pos, resp.pgnos)),
         }
+    }
+
+    pub(crate) fn acquire_lease(&self, db: &str, op: LeaseOp) -> Result<Lease> {
+        log::debug!("[lfscs] acquire_lease: db = {}, op = {}", db, op);
+
+        let mut u = self.host.clone();
+        u.set_path("/lease");
+        u.query_pairs_mut().append_pair("db", db);
+        match op {
+            LeaseOp::Acquire(duration) => u
+                .query_pairs_mut()
+                .append_pair("duration", &duration.as_millis().to_string()),
+
+            LeaseOp::Refresh(lease, duration) => u
+                .query_pairs_mut()
+                .append_pair("id", lease)
+                .append_pair("duration", &duration.as_millis().to_string()),
+        };
+
+        self.call::<Lease>("POST", u)
+    }
+
+    pub(crate) fn release_lease(&self, db: &str, lease: Lease) -> Result<()> {
+        log::debug!("[lfscs] release_lease: db = {}, lease = {}", db, lease.id);
+
+        let mut u = self.host.clone();
+        u.set_path("/lease");
+        u.query_pairs_mut()
+            .append_pair("db", db)
+            .append_pair("id", &lease.id);
+
+        let req = self.make_request("DELETE", u);
+        let resp = self.process_response(req.call())?;
+        // consume the body (and ignore any errors) to reuse the connection
+        io::copy(&mut resp.into_reader(), &mut io::sink()).ok();
+
+        Ok(())
     }
 
     #[cfg(not(target_os = "emscripten"))]
@@ -437,7 +509,7 @@ impl ClientBuilder {
 
 #[cfg(test)]
 mod tests {
-    use super::Page;
+    use super::{Lease, Page};
     use serde_test::{assert_de_tokens, Token};
 
     #[test]
@@ -458,6 +530,31 @@ mod tests {
                 Token::U32(123),
                 Token::Str("data"),
                 Token::BorrowedStr("AQIDBAUG"),
+                Token::StructEnd,
+            ],
+        );
+    }
+
+    #[test]
+    fn lease_de() {
+        use time::macros::datetime;
+
+        let lease = Lease {
+            id: "123456789".into(),
+            expires_at: datetime!(2023-08-29 13:20:55.706550992 +2),
+        };
+
+        assert_de_tokens(
+            &lease,
+            &[
+                Token::Struct {
+                    name: "Lease",
+                    len: 2,
+                },
+                Token::Str("id"),
+                Token::Str("123456789"),
+                Token::Str("expires_at"),
+                Token::Str("2023-08-29T11:20:55.706550992Z"),
                 Token::StructEnd,
             ],
         );

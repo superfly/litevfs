@@ -1,4 +1,5 @@
 use crate::{
+    leaser::Leaser,
     lfsc,
     locks::{ConnLock, VfsLock},
     pager::{PageRef, Pager},
@@ -20,14 +21,20 @@ pub(crate) struct DatabaseManager {
     pager: Arc<Pager>,
     databases: HashMap<String, Arc<RwLock<Database>>>,
     client: Arc<lfsc::Client>,
+    leaser: Arc<Leaser>,
 }
 
 impl DatabaseManager {
-    pub(crate) fn new(pager: Arc<Pager>, client: Arc<lfsc::Client>) -> DatabaseManager {
+    pub(crate) fn new(
+        pager: Arc<Pager>,
+        client: Arc<lfsc::Client>,
+        leaser: Arc<Leaser>,
+    ) -> DatabaseManager {
         DatabaseManager {
             pager,
             databases: HashMap::new(),
             client,
+            leaser,
         }
     }
 
@@ -101,6 +108,7 @@ impl DatabaseManager {
             pos,
             Arc::clone(&self.pager),
             Arc::clone(&self.client),
+            Arc::clone(&self.leaser),
         )?))))
     }
 
@@ -120,6 +128,7 @@ pub(crate) struct Database {
     pub(crate) name: String,
     client: Arc<lfsc::Client>,
     pager: Arc<Pager>,
+    leaser: Arc<Leaser>,
     ltx_path: PathBuf,
     pub(crate) journal_path: PathBuf,
     pub(crate) page_size: Option<ltx::PageSize>,
@@ -138,6 +147,7 @@ impl Database {
         pos: Option<ltx::Pos>,
         pager: Arc<Pager>,
         client: Arc<lfsc::Client>,
+        leaser: Arc<Leaser>,
     ) -> io::Result<Database> {
         let ltx_path = pager.db_path(name).join("ltx");
         let journal_path = pager.db_path(name).join("journal");
@@ -161,6 +171,7 @@ impl Database {
             lock: VfsLock::new(),
             name: name.into(),
             client,
+            leaser,
             pager,
             ltx_path,
             journal_path,
@@ -301,6 +312,8 @@ impl Database {
             self.current_db_size = Some(Database::parse_commit_database(buf)?);
         }
 
+        _ = self.leaser.get_lease(&self.name)?;
+
         self.ensure_aligned(buf, offset)?;
         let page_num = self.page_num_for(offset)?;
 
@@ -402,6 +415,8 @@ impl Database {
             io::ErrorKind::Other,
             "database size unknown",
         ))?;
+        let lease = self.leaser.get_lease(&self.name)?;
+
         let ltx_path = self.ltx_path.join(format!("{0}-{0}.ltx", txid));
         let mut file = fs::OpenOptions::new()
             .read(true)
@@ -443,7 +458,7 @@ impl Database {
         // rewind the file and send it to LFSC
         file.seek(SeekFrom::Start(0))?;
         self.client
-            .write_tx(&self.name, &file, file.metadata()?.len())?;
+            .write_tx(&self.name, &file, file.metadata()?.len(), &lease)?;
         fs::remove_file(&ltx_path)?;
 
         Ok(checksum)
@@ -514,5 +529,13 @@ impl Database {
         self.pos = Some(pos);
 
         Ok(())
+    }
+
+    pub(crate) fn acquire_lease(&self) -> io::Result<()> {
+        self.leaser.acquire_lease(&self.name)
+    }
+
+    pub(crate) fn release_lease(&self) -> io::Result<()> {
+        self.leaser.release_lease(&self.name)
     }
 }
