@@ -3,6 +3,21 @@ use rand::distributions::{Alphanumeric, DistString};
 use sqlite_vfs::{ffi, RegisterError};
 use std::{env, fs, process};
 
+fn init_logger() {
+    let target = if let Ok(filename) = env::var("LITEVFS_LOG_FILE") {
+        env_logger::Target::Pipe(Box::new(
+            fs::File::create(filename).expect("can't open log file"),
+        ))
+    } else {
+        env_logger::Target::Stderr
+    };
+
+    env_logger::Builder::from_env(env_logger::Env::default())
+        .target(target)
+        .try_init()
+        .ok();
+}
+
 fn prepare() -> Result<(lfsc::Client, String), Box<dyn std::error::Error + 'static>> {
     let client = lfsc::Client::from_env()?;
 
@@ -26,7 +41,7 @@ pub extern "C" fn sqlite3_litevfs_init(
 ) -> std::ffi::c_int {
     use std::{ffi::CString, ptr};
 
-    env_logger::try_init().ok();
+    init_logger();
 
     log::info!("registering LiteVFS");
     let (client, cache_dir) = match prepare() {
@@ -63,7 +78,7 @@ pub extern "C" fn sqlite3_litevfs_init(
 #[no_mangle]
 #[cfg(target_os = "emscripten")]
 pub extern "C" fn sqlite3_wasm_extra_init(_unused: *const std::ffi::c_char) -> std::ffi::c_int {
-    env_logger::try_init().ok();
+    init_logger();
 
     log::info!("registering LiteVFS");
     let (client, cache_dir) = match prepare() {
