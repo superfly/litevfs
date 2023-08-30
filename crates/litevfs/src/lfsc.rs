@@ -112,8 +112,8 @@ impl AsRef<[u8]> for Page {
 /// A set of pages changed since previously known state.
 #[derive(Debug)]
 pub(crate) enum Changes {
-    All(ltx::Pos),
-    Pages(ltx::Pos, Option<Vec<ltx::PageNum>>),
+    All(Option<ltx::Pos>),
+    Pages(Option<ltx::Pos>, Option<Vec<ltx::PageNum>>),
 }
 
 #[derive(Debug)]
@@ -141,6 +141,48 @@ pub(crate) struct Lease {
 impl fmt::Display for Lease {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::result::Result<(), fmt::Error> {
         write!(f, "{}/{}", self.id, self.expires_at)
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct Pos {
+    #[serde(rename = "txid")]
+    txid: String,
+    #[serde(rename = "postApplyChecksum")]
+    post_apply_checksum: String,
+}
+
+impl Pos {
+    fn into_ltx_pos(self) -> io::Result<Option<ltx::Pos>> {
+        let txid = u64::from_str_radix(&self.txid, 16);
+        let checksum = u64::from_str_radix(&self.post_apply_checksum, 16);
+
+        if (Ok(0), Ok(0)) == (txid, checksum) {
+            return Ok(None);
+        };
+
+        let pos: ltx::Pos = self.try_into()?;
+        Ok(Some(pos))
+    }
+}
+
+impl TryFrom<Pos> for ltx::Pos {
+    type Error = io::Error;
+
+    fn try_from(p: Pos) -> std::result::Result<Self, Self::Error> {
+        let txid: ltx::TXID = p
+            .txid
+            .try_into()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let post_apply_checksum: ltx::Checksum = p
+            .post_apply_checksum
+            .try_into()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+        Ok(ltx::Pos {
+            txid,
+            post_apply_checksum,
+        })
     }
 }
 
@@ -202,13 +244,19 @@ impl Client {
         format!("{}{}", Client::CLUSTER_ID_PREFIX, hex::encode_upper(buf))
     }
 
-    pub(crate) fn pos_map(&self) -> Result<HashMap<String, ltx::Pos>> {
+    pub(crate) fn pos_map(&self) -> Result<HashMap<String, Option<ltx::Pos>>> {
         log::debug!("[lfsc] pos_map");
 
         let mut u = self.host.clone();
         u.set_path("/pos");
 
-        self.call("GET", u)
+        let resp = self.call::<HashMap<String, Pos>>("GET", u)?;
+        let mut ret = HashMap::with_capacity(resp.len());
+        for (k, v) in resp {
+            ret.insert(k, v.into_ltx_pos()?);
+        }
+
+        Ok(ret)
     }
 
     #[cfg(not(target_os = "emscripten"))]
@@ -291,7 +339,7 @@ impl Client {
 
         #[derive(serde::Deserialize)]
         struct SyncResponse {
-            pos: ltx::Pos,
+            pos: Pos,
             pgnos: Option<Vec<ltx::PageNum>>,
             all: Option<bool>,
         }
@@ -299,8 +347,8 @@ impl Client {
         let resp = self.call::<SyncResponse>("GET", u)?;
 
         match resp.all {
-            Some(true) => Ok(Changes::All(resp.pos)),
-            _ => Ok(Changes::Pages(resp.pos, resp.pgnos)),
+            Some(true) => Ok(Changes::All(resp.pos.into_ltx_pos()?)),
+            _ => Ok(Changes::Pages(resp.pos.into_ltx_pos()?, resp.pgnos)),
         }
     }
 

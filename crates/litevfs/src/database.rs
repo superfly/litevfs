@@ -96,6 +96,7 @@ impl DatabaseManager {
             return Ok(None);
         }
 
+        let pos = pos.flatten();
         log::info!(
             "[manager] get_database_remote: name = {}, access = {:?}, pos = {}",
             dbname,
@@ -492,7 +493,7 @@ impl Database {
                     "[database] sync: db = {}, prev_pos = {}, pos = {}, all pages have changed",
                     self.name,
                     PosLogger(&self.pos),
-                    pos
+                    PosLogger(&pos)
                 );
                 self.pager.clear(&self.name)?;
                 pos
@@ -504,7 +505,7 @@ impl Database {
                     "[database] sync: db = {}, prev_pos = {}, pos = {}, pages = {}",
                     self.name,
                     PosLogger(&self.pos),
-                    pos,
+                    PosLogger(&pos),
                     PageNumLogger(&pgnos)
                 );
                 for pgno in pgnos {
@@ -519,14 +520,14 @@ impl Database {
                     "[database] sync: db = {}, prev_pos = {}, pos = {}, no changes",
                     self.name,
                     PosLogger(&self.pos),
-                    pos
+                    PosLogger(&pos),
                 );
                 pos
             }
         };
 
         self.last_sync_at = time::SystemTime::now();
-        self.pos = Some(pos);
+        self.pos = pos;
 
         Ok(())
     }
