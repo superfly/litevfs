@@ -69,6 +69,7 @@ impl fmt::Display for LfscError {
 struct LfscErrorRepr {
     code: String,
     error: String,
+    #[serde(with = "option_pos")]
     pos: Option<ltx::Pos>,
 }
 
@@ -144,48 +145,6 @@ impl fmt::Display for Lease {
     }
 }
 
-#[derive(serde::Deserialize)]
-struct Pos {
-    #[serde(rename = "txid")]
-    txid: String,
-    #[serde(rename = "postApplyChecksum")]
-    post_apply_checksum: String,
-}
-
-impl Pos {
-    fn into_ltx_pos(self) -> io::Result<Option<ltx::Pos>> {
-        let txid = u64::from_str_radix(&self.txid, 16);
-        let checksum = u64::from_str_radix(&self.post_apply_checksum, 16);
-
-        if (Ok(0), Ok(0)) == (txid, checksum) {
-            return Ok(None);
-        };
-
-        let pos: ltx::Pos = self.try_into()?;
-        Ok(Some(pos))
-    }
-}
-
-impl TryFrom<Pos> for ltx::Pos {
-    type Error = io::Error;
-
-    fn try_from(p: Pos) -> std::result::Result<Self, Self::Error> {
-        let txid: ltx::TXID = p
-            .txid
-            .try_into()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let post_apply_checksum: ltx::Checksum = p
-            .post_apply_checksum
-            .try_into()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-
-        Ok(ltx::Pos {
-            txid,
-            post_apply_checksum,
-        })
-    }
-}
-
 impl Client {
     const CLUSTER_ID_LEN: usize = 20;
     const CLUSTER_ID_PREFIX: &'static str = "LFSC";
@@ -250,13 +209,15 @@ impl Client {
         let mut u = self.host.clone();
         u.set_path("/pos");
 
-        let resp = self.call::<HashMap<String, Pos>>("GET", u)?;
-        let mut ret = HashMap::with_capacity(resp.len());
-        for (k, v) in resp {
-            ret.insert(k, v.into_ltx_pos()?);
-        }
+        #[derive(serde::Deserialize)]
+        #[serde(transparent)]
+        struct Helper(#[serde(with = "option_pos")] Option<ltx::Pos>);
 
-        Ok(ret)
+        Ok(self
+            .call::<HashMap<String, Helper>>("GET", u)?
+            .into_iter()
+            .map(|(k, v)| (k, v.0))
+            .collect())
     }
 
     #[cfg(not(target_os = "emscripten"))]
@@ -339,7 +300,8 @@ impl Client {
 
         #[derive(serde::Deserialize)]
         struct SyncResponse {
-            pos: Pos,
+            #[serde(with = "option_pos")]
+            pos: Option<ltx::Pos>,
             pgnos: Option<Vec<ltx::PageNum>>,
             all: Option<bool>,
         }
@@ -347,8 +309,8 @@ impl Client {
         let resp = self.call::<SyncResponse>("GET", u)?;
 
         match resp.all {
-            Some(true) => Ok(Changes::All(resp.pos.into_ltx_pos()?)),
-            _ => Ok(Changes::Pages(resp.pos.into_ltx_pos()?, resp.pgnos)),
+            Some(true) => Ok(Changes::All(resp.pos)),
+            _ => Ok(Changes::Pages(resp.pos, resp.pgnos)),
         }
     }
 
@@ -551,6 +513,54 @@ impl ClientBuilder {
             cluster: self.cluster,
             cluster_id: None,
             instance_id: sync::RwLock::new(None),
+        }
+    }
+}
+
+mod option_pos {
+    use serde::{
+        de::{self, Deserializer},
+        // ser::{Serialize, SerializeStruct, Serializer},
+        Deserialize,
+    };
+
+    // pub fn serialize<S>(value: &Option<ltx::Pos>, serializer: S) -> Result<S::Ok, S::Error>
+    // where
+    //     S: Serializer,
+    // {
+    //     match value {
+    //         Some(pos) => pos.serialize(serializer),
+    //         None => {
+    //             let mut state = serializer.serialize_struct("Pos", 2)?;
+    //             state.serialize_field("txid", "0000000000000000")?;
+    //             state.serialize_field("postApplyChecksum", "0000000000000000")?;
+    //             state.end()
+    //         }
+    //     }
+    // }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<ltx::Pos>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Helper {
+            txid: String,
+            #[serde(rename = "postApplyChecksum")]
+            post_apply_checksum: String,
+        }
+
+        let helper = Helper::deserialize(deserializer)?;
+        let txid = u64::from_str_radix(&helper.txid, 16).map_err(de::Error::custom)?;
+        let post_apply_checksum =
+            u64::from_str_radix(&helper.post_apply_checksum, 16).map_err(de::Error::custom)?;
+
+        match (txid, post_apply_checksum) {
+            (0, 0) => Ok(None),
+            (t, p) => Ok(Some(ltx::Pos {
+                txid: ltx::TXID::new(t).map_err(de::Error::custom)?,
+                post_apply_checksum: ltx::Checksum::new(p),
+            })),
         }
     }
 }
