@@ -30,7 +30,7 @@ url = "2.4"
 ureq = { version = "2.7", features = ["json"] }
 
 [target.'cfg(target_os = "emscripten")'.dependencies]
-emscripten = { path = "../emscripten" }
+emscripten-sys = { path = "../emscripten-sys" }
 
 [dev-dependencies]
 serde_test = "1.0"

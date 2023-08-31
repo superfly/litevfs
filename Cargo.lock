@@ -195,7 +195,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "emscripten"
+name = "emscripten-sys"
 version = "0.1.0"
 dependencies = [
  "url",
@@ -374,7 +374,7 @@ dependencies = [
  "bytesize",
  "caches",
  "crossbeam-channel",
- "emscripten",
+ "emscripten-sys",
  "env_logger",
  "hex",
  "humantime",

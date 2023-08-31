@@ -482,7 +482,7 @@ impl Database {
     }
 
     pub(crate) fn sync(&mut self) -> io::Result<()> {
-        let pos = match self.client.sync(&self.name, self.pos) {
+        let pos = match self.client.sync_db(&self.name, self.pos) {
             // New database, never written to, just skip the sync
             Err(lfsc::Error::Lfsc(err)) if err.code == "ENODB" => return Ok(()),
             Err(x) => return Err(x.into()),

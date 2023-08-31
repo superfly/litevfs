@@ -1,9 +1,11 @@
 mod database;
 mod ext;
+mod http;
 mod leaser;
 mod lfsc;
 mod locks;
 mod pager;
+mod syncer;
 mod vfs;
 
 use sqlite_vfs::ffi;

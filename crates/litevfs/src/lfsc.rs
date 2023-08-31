@@ -1,6 +1,5 @@
+use crate::{http, PosLogger};
 use std::{collections::HashMap, env, fmt, io, sync};
-
-use crate::PosLogger;
 
 /// All possible errors returned by the LFSC client.
 #[derive(thiserror::Error, Debug)]
@@ -220,7 +219,6 @@ impl Client {
             .collect())
     }
 
-    #[cfg(not(target_os = "emscripten"))]
     pub(crate) fn write_tx(
         &self,
         db: &str,
@@ -244,11 +242,6 @@ impl Client {
         io::copy(&mut resp.into_reader(), &mut io::sink()).ok();
 
         Ok(())
-    }
-
-    #[cfg(target_os = "emscripten")]
-    pub(crate) fn write_tx(&self, _db: &str, _ltx: impl io::Read, _ltx_len: u64) -> Result<()> {
-        return Err(io::Error::new(io::ErrorKind::Other, "not implemented").into());
     }
 
     pub(crate) fn get_page(
@@ -288,7 +281,7 @@ impl Client {
         self.call("GET", u)
     }
 
-    pub(crate) fn sync(&self, db: &str, pos: Option<ltx::Pos>) -> Result<Changes> {
+    pub(crate) fn sync_db(&self, db: &str, pos: Option<ltx::Pos>) -> Result<Changes> {
         log::debug!("[lfsc] sync: db = {}, pos = {}", db, PosLogger(&pos));
 
         let mut u = self.host.clone();
@@ -351,7 +344,6 @@ impl Client {
         Ok(())
     }
 
-    #[cfg(not(target_os = "emscripten"))]
     fn call<R>(&self, method: &str, u: url::Url) -> Result<R>
     where
         R: serde::de::DeserializeOwned,
@@ -362,13 +354,12 @@ impl Client {
         Ok(resp.into_json()?)
     }
 
-    #[cfg(not(target_os = "emscripten"))]
-    fn make_request(&self, method: &str, mut u: url::Url) -> ureq::Request {
+    fn make_request(&self, method: &str, mut u: url::Url) -> http::Request {
         if let Some(ref cluster) = self.cluster {
             u.query_pairs_mut().append_pair("cluster", cluster);
         }
 
-        let mut req = ureq::request_url(method, &u);
+        let mut req = http::Request::new(method, &u);
         if let Some(ref token) = self.token {
             req = req.set("Authorization", token);
         }
@@ -382,11 +373,10 @@ impl Client {
         req
     }
 
-    #[cfg(not(target_os = "emscripten"))]
     fn process_response(
         &self,
-        resp: std::result::Result<ureq::Response, ureq::Error>,
-    ) -> Result<ureq::Response> {
+        resp: std::result::Result<http::Response, http::Error>,
+    ) -> Result<http::Response> {
         match resp {
             Ok(resp) => {
                 let mut instance_id = self.instance_id.write().unwrap();
@@ -396,71 +386,9 @@ impl Client {
 
                 Ok(resp)
             }
-            Err(ureq::Error::Transport(err)) => Err(Error::Transport(err.to_string())),
-            Err(ureq::Error::Status(code, body)) => {
+            Err(http::Error::Transport(err)) => Err(Error::Transport(err)),
+            Err(http::Error::Status(code, body)) => {
                 let repr: LfscErrorRepr = body.into_json()?;
-                match repr.pos {
-                    Some(pos) if repr.code == "EPOSMISMATCH" => Err(Error::PosMismatch(pos)),
-                    _ => Err(Error::Lfsc(LfscError {
-                        http_code: code,
-                        code: repr.code,
-                        error: repr.error,
-                    })),
-                }
-            }
-        }
-    }
-
-    #[cfg(target_os = "emscripten")]
-    fn call<R>(&self, method: &str, mut u: url::Url) -> Result<R>
-    where
-        R: serde::de::DeserializeOwned,
-    {
-        if let Some(ref cluster) = self.cluster {
-            u.query_pairs_mut().append_pair("cluster", cluster);
-        }
-
-        let mut headers = HashMap::new();
-        if let Some(ref token) = self.token {
-            headers.insert("Authorization", token.into());
-        }
-        if let Some(instance_id) = self.instance_id.read().unwrap().as_deref() {
-            headers.insert("fly-force-instance-id", instance_id.into());
-        }
-        if let Some(ref cluster_id) = self.cluster_id {
-            headers.insert("Litefs-Cluster-Id", cluster_id.into());
-        }
-
-        match method {
-            "GET" => {
-                let resp = self.process_response(emscripten::get(u, headers))?;
-                Ok(serde_json::from_slice(resp.body)?)
-            }
-            _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "Method not supported").into()),
-        }
-    }
-
-    #[cfg(target_os = "emscripten")]
-    fn process_response<'a, 'b>(
-        &'b self,
-        resp: std::result::Result<emscripten::Response<'b>, emscripten::Error>,
-    ) -> Result<emscripten::Response<'b>> {
-        match resp {
-            Ok(resp) => {
-                log::info!("all headers = {:?}", resp.headers);
-                let mut instance_id = self.instance_id.write().unwrap();
-                if instance_id.as_deref()
-                    != resp.headers.get("lfsc-instance-id").map(|x| x.as_str())
-                {
-                    *instance_id = resp.headers.get("lfsc-instance-id").map(Into::into);
-                    log::warn!("got new instance id {:?}", *instance_id);
-                }
-
-                Ok(resp)
-            }
-            Err(emscripten::Error::IO(err)) => Err(Error::Transport(err.to_string())),
-            Err(emscripten::Error::Status(code, resp)) => {
-                let repr: LfscErrorRepr = serde_json::from_slice(resp.body)?;
                 match repr.pos {
                     Some(pos) if repr.code == "EPOSMISMATCH" => Err(Error::PosMismatch(pos)),
                     _ => Err(Error::Lfsc(LfscError {
