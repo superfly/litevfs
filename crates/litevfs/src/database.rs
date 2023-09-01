@@ -476,7 +476,11 @@ impl Database {
         self.syncer.needs_sync(&self.name, self.pos)
     }
 
-    pub(crate) fn sync(&mut self) -> io::Result<()> {
+    pub(crate) fn sync(&mut self, force: bool) -> io::Result<()> {
+        if force {
+            self.syncer.sync()?;
+        }
+
         let pos = match self.syncer.get_changes(&self.name, self.pos)? {
             // No changes
             (pos, None) => {

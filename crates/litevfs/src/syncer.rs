@@ -140,6 +140,32 @@ mod native {
             }
         }
 
+        pub(crate) fn sync(&self) -> io::Result<()> {
+            let positions = self.inner.lock().unwrap().positions.clone();
+
+            log::debug!("[syncer] sync: positions = {:?}", positions);
+
+            let changes = self.client.sync(positions)?;
+
+            let mut inner = self.inner.lock().unwrap();
+            let positions = changes
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.pos()))
+                .collect();
+            let changes = changes
+                .into_iter()
+                .filter_map(|(k, v)| {
+                    let changes = merge_changes(v.into(), inner.changes.remove(&k))?;
+                    Some((k, changes))
+                })
+                .collect();
+
+            inner.positions = positions;
+            inner.changes = changes;
+
+            Ok(())
+        }
+
         fn notify(&self) {
             self.notifier.send(()).unwrap();
         }
@@ -164,32 +190,6 @@ mod native {
                 recv(waiter) -> _ => (),
                 };
             }
-        }
-
-        fn sync(&self) -> io::Result<()> {
-            let positions = self.inner.lock().unwrap().positions.clone();
-
-            log::debug!("[syncer] sync: positions = {:?}", positions);
-
-            let changes = self.client.sync(positions)?;
-
-            let mut inner = self.inner.lock().unwrap();
-            let positions = changes
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.pos()))
-                .collect();
-            let changes = changes
-                .into_iter()
-                .filter_map(|(k, v)| {
-                    let changes = merge_changes(v.into(), inner.changes.remove(&k))?;
-                    Some((k, changes))
-                })
-                .collect();
-
-            inner.positions = positions;
-            inner.changes = changes;
-
-            Ok(())
         }
     }
 
@@ -276,5 +276,9 @@ mod emscripten {
         }
 
         pub(crate) fn put_changes(&self, _db: &str, _prev_changes: super::Changes) {}
+
+        pub(crate) fn sync(&self) -> io::Result<()> {
+            Ok(())
+        }
     }
 }
