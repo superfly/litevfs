@@ -2,6 +2,7 @@
 members = [
 	"crates/*",
 ]
+resolver = "2"
 
 # optimize for small code size
 [profile.release]

@@ -9,7 +9,7 @@ mod syncer;
 mod vfs;
 
 use sqlite_vfs::ffi;
-use std::fmt;
+use std::{collections::BTreeSet, fmt};
 pub use vfs::LiteVfs;
 
 /// A custom SQLite error code to indicate that LFSC no longer have the
@@ -30,7 +30,7 @@ impl<'a> fmt::Display for PosLogger<'a> {
     }
 }
 
-struct PageNumLogger<'a>(&'a [ltx::PageNum]);
+struct PageNumLogger<'a>(&'a BTreeSet<ltx::PageNum>);
 
 impl<'a> fmt::Display for PageNumLogger<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {

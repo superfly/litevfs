@@ -11,7 +11,7 @@ pub(crate) enum Error {
 
 #[cfg(not(target_os = "emscripten"))]
 mod native {
-    use serde::de::DeserializeOwned;
+    use serde::{de::DeserializeOwned, Serialize};
     use std::io::Read;
     use url::Url;
 
@@ -41,6 +41,10 @@ mod native {
         pub(crate) fn send(self, reader: impl Read) -> Result<Response, super::Error> {
             self.0.send(reader).map(Response).map_err(map_err)
         }
+
+        pub(crate) fn send_json(self, data: impl Serialize) -> Result<Response, super::Error> {
+            self.0.send_json(data).map(Response).map_err(map_err)
+        }
     }
 
     impl Response {
@@ -66,7 +70,7 @@ mod emscripten {
         emscripten_fetch_get_response_headers_length, emscripten_fetch_t,
         EMSCRIPTEN_FETCH_LOAD_TO_MEMORY, EMSCRIPTEN_FETCH_REPLACE, EMSCRIPTEN_FETCH_SYNCHRONOUS,
     };
-    use serde::de::DeserializeOwned;
+    use serde::{de::DeserializeOwned, Serialize};
     use std::{
         ffi::{c_char, CString},
         io::{self, Read},
@@ -134,6 +138,28 @@ mod emscripten {
                 .read_to_end(&mut body)
                 .map_err(|e| super::Error::Transport(e.to_string()))?;
 
+            self.do_send(&body)
+        }
+
+        pub(crate) fn send_json(mut self, data: impl Serialize) -> Result<Response, super::Error> {
+            if self.header("Content-Type").is_none() {
+                self = self.set("Content-Type", "application/json");
+            }
+
+            let json_bytes = serde_json::to_vec(&data)
+                .expect("Failed to serialize data passed to send_json into JSON");
+
+            self.do_send(&json_bytes)
+        }
+
+        pub(crate) fn header(&self, header: &str) -> Option<&str> {
+            self.headers
+                .iter()
+                .find(|h| h.name().eq_ignore_ascii_case(header))
+                .and_then(|h| h.value())
+        }
+
+        fn do_send(self, body: &[u8]) -> Result<Response, super::Error> {
             let headers = self.headers();
             let mut req = self.fetch_attr(&headers);
             req.requestData = body.as_ptr() as *const i8;

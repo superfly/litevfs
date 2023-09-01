@@ -68,6 +68,7 @@ impl fmt::Display for LfscError {
 struct LfscErrorRepr {
     code: String,
     error: String,
+    #[serde(default)]
     #[serde(with = "option_pos")]
     pos: Option<ltx::Pos>,
 }
@@ -109,11 +110,36 @@ impl AsRef<[u8]> for Page {
     }
 }
 
+#[derive(serde::Deserialize)]
+struct DbChanges {
+    #[serde(with = "option_pos")]
+    pos: Option<ltx::Pos>,
+    pgnos: Option<Vec<ltx::PageNum>>,
+    all: Option<bool>,
+}
+
 /// A set of pages changed since previously known state.
 #[derive(Debug)]
 pub(crate) enum Changes {
     All(Option<ltx::Pos>),
     Pages(Option<ltx::Pos>, Option<Vec<ltx::PageNum>>),
+}
+
+impl Changes {
+    pub(crate) fn pos(&self) -> Option<ltx::Pos> {
+        match self {
+            Changes::All(pos) => *pos,
+            Changes::Pages(pos, _) => *pos,
+        }
+    }
+}
+impl From<DbChanges> for Changes {
+    fn from(c: DbChanges) -> Changes {
+        match c.all {
+            Some(true) => Changes::All(c.pos),
+            _ => Changes::Pages(c.pos, c.pgnos),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -172,12 +198,13 @@ impl Client {
 
         let mut client = builder.build();
 
-        let info = client.info()?;
-        client.set_cluster_id(if let Some(cluster_id) = info.cluster_id {
-            cluster_id
-        } else {
-            Client::generate_cluster_id()
-        });
+        // let info = client.info()?;
+        // client.set_cluster_id(if let Some(cluster_id) = info.cluster_id {
+        //     cluster_id
+        // } else {
+        //     Client::generate_cluster_id()
+        // });
+        client.set_cluster_id(Client::generate_cluster_id());
 
         log::info!(
             "[lfsc] from_env: host = {}, cluster = {:?}, cluster_id = {:?}",
@@ -272,6 +299,7 @@ impl Client {
         Ok(self.call::<GetPageResponse>("GET", u)?.pages)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn info(&self) -> Result<Info> {
         log::debug!("[lfsc] info");
 
@@ -281,6 +309,7 @@ impl Client {
         self.call("GET", u)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn sync_db(&self, db: &str, pos: Option<ltx::Pos>) -> Result<Changes> {
         log::debug!("[lfsc] sync: db = {}, pos = {}", db, PosLogger(&pos));
 
@@ -291,20 +320,7 @@ impl Client {
             u.query_pairs_mut().append_pair("pos", &pos.to_string());
         }
 
-        #[derive(serde::Deserialize)]
-        struct SyncResponse {
-            #[serde(with = "option_pos")]
-            pos: Option<ltx::Pos>,
-            pgnos: Option<Vec<ltx::PageNum>>,
-            all: Option<bool>,
-        }
-
-        let resp = self.call::<SyncResponse>("GET", u)?;
-
-        match resp.all {
-            Some(true) => Ok(Changes::All(resp.pos)),
-            _ => Ok(Changes::Pages(resp.pos, resp.pgnos)),
-        }
+        Ok(self.call::<DbChanges>("GET", u)?.into())
     }
 
     pub(crate) fn acquire_lease(&self, db: &str, op: LeaseOp) -> Result<Lease> {
@@ -342,6 +358,43 @@ impl Client {
         io::copy(&mut resp.into_reader(), &mut io::sink()).ok();
 
         Ok(())
+    }
+
+    pub(crate) fn sync(
+        &self,
+        positions: HashMap<String, Option<ltx::Pos>>,
+    ) -> Result<HashMap<String, Changes>> {
+        log::debug!("[lfscs] sync: positions = {:?}", positions);
+
+        let mut u = self.host.clone();
+        u.set_path("/sync");
+
+        #[derive(serde::Serialize)]
+        #[serde(transparent)]
+        struct Helper(#[serde(with = "option_pos")] Option<ltx::Pos>);
+
+        #[derive(serde::Serialize)]
+        struct SyncRequest {
+            positions: HashMap<String, Helper>,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct SyncResponse {
+            changes: HashMap<String, DbChanges>,
+        }
+
+        let positions: HashMap<String, Helper> =
+            positions.into_iter().map(|(k, v)| (k, Helper(v))).collect();
+
+        let req = self.make_request("POST", u);
+        let resp = self.process_response(req.send_json(SyncRequest { positions }))?;
+        let resp = resp.into_json::<SyncResponse>()?;
+
+        Ok(resp
+            .changes
+            .into_iter()
+            .map(|(k, v)| (k, v.into()))
+            .collect())
     }
 
     fn call<R>(&self, method: &str, u: url::Url) -> Result<R>
@@ -402,6 +455,7 @@ impl Client {
     }
 }
 
+#[allow(dead_code)]
 #[derive(serde::Deserialize)]
 pub(crate) struct Info {
     #[serde(rename = "clusterID")]
@@ -448,24 +502,24 @@ impl ClientBuilder {
 mod option_pos {
     use serde::{
         de::{self, Deserializer},
-        // ser::{Serialize, SerializeStruct, Serializer},
+        ser::{Serialize, SerializeStruct, Serializer},
         Deserialize,
     };
 
-    // pub fn serialize<S>(value: &Option<ltx::Pos>, serializer: S) -> Result<S::Ok, S::Error>
-    // where
-    //     S: Serializer,
-    // {
-    //     match value {
-    //         Some(pos) => pos.serialize(serializer),
-    //         None => {
-    //             let mut state = serializer.serialize_struct("Pos", 2)?;
-    //             state.serialize_field("txid", "0000000000000000")?;
-    //             state.serialize_field("postApplyChecksum", "0000000000000000")?;
-    //             state.end()
-    //         }
-    //     }
-    // }
+    pub fn serialize<S>(value: &Option<ltx::Pos>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(pos) => pos.serialize(serializer),
+            None => {
+                let mut state = serializer.serialize_struct("Pos", 2)?;
+                state.serialize_field("txid", "0000000000000000")?;
+                state.serialize_field("postApplyChecksum", "0000000000000000")?;
+                state.end()
+            }
+        }
+    }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<ltx::Pos>, D::Error>
     where
@@ -478,7 +532,7 @@ mod option_pos {
             post_apply_checksum: String,
         }
 
-        let helper = Helper::deserialize(deserializer)?;
+        let helper: Helper = Deserialize::deserialize(deserializer)?;
         let txid = u64::from_str_radix(&helper.txid, 16).map_err(de::Error::custom)?;
         let post_apply_checksum =
             u64::from_str_radix(&helper.post_apply_checksum, 16).map_err(de::Error::custom)?;

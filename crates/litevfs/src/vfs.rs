@@ -4,6 +4,7 @@ use crate::{
     lfsc,
     locks::{ConnLock, VfsLock},
     pager::Pager,
+    syncer::Syncer,
 };
 use bytesize::ByteSize;
 use humantime::{format_duration, parse_duration};
@@ -25,6 +26,7 @@ use std::{
 pub struct LiteVfs {
     path: PathBuf,
     pager: Arc<Pager>,
+    syncer: Arc<Syncer>,
     database_manager: Mutex<DatabaseManager>,
     temp_counter: AtomicU64,
 }
@@ -68,6 +70,7 @@ impl Vfs for LiteVfs {
                     let conn_lock = database.read().unwrap().conn_lock();
                     LiteHandle::new(LiteDatabaseHandle::new(
                         Arc::clone(&self.pager),
+                        Arc::clone(&self.syncer),
                         database,
                         conn_lock,
                     ))
@@ -165,11 +168,13 @@ impl LiteVfs {
         let client = Arc::new(client);
         let pager = Arc::new(Pager::new(&path, Arc::clone(&client)));
         let leaser = Leaser::new(Arc::clone(&client), time::Duration::from_secs(1));
+        let syncer = Syncer::new(Arc::clone(&client), time::Duration::from_secs(1));
 
         LiteVfs {
             path: path.as_ref().to_path_buf(),
             pager: Arc::clone(&pager),
-            database_manager: Mutex::new(DatabaseManager::new(pager, client, leaser)),
+            syncer: Arc::clone(&syncer),
+            database_manager: Mutex::new(DatabaseManager::new(pager, client, leaser, syncer)),
             temp_counter: AtomicU64::new(0),
         }
     }
@@ -361,16 +366,23 @@ impl sqlite_vfs::DatabaseHandle for LiteHandle {
 
 struct LiteDatabaseHandle {
     pager: Arc<Pager>,
+    syncer: Arc<Syncer>,
     database: Arc<RwLock<Database>>,
     lock: ConnLock,
     name: String,
 }
 
 impl LiteDatabaseHandle {
-    pub(crate) fn new(pager: Arc<Pager>, database: Arc<RwLock<Database>>, lock: ConnLock) -> Self {
+    pub(crate) fn new(
+        pager: Arc<Pager>,
+        syncer: Arc<Syncer>,
+        database: Arc<RwLock<Database>>,
+        lock: ConnLock,
+    ) -> Self {
         let name = database.read().unwrap().name.clone();
         LiteDatabaseHandle {
             pager,
+            syncer,
             database,
             lock,
             name,
@@ -448,6 +460,12 @@ impl LiteDatabaseHandle {
         self.release_exclusive();
 
         Ok(())
+    }
+}
+
+impl Drop for LiteDatabaseHandle {
+    fn drop(&mut self) {
+        self.syncer.close_conn(&self.name)
     }
 }
 

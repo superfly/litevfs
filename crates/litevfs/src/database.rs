@@ -3,6 +3,7 @@ use crate::{
     lfsc,
     locks::{ConnLock, VfsLock},
     pager::{PageRef, Pager},
+    syncer::{Changes, Syncer},
     PageNumLogger, PosLogger,
 };
 use sqlite_vfs::OpenAccess;
@@ -22,6 +23,7 @@ pub(crate) struct DatabaseManager {
     databases: HashMap<String, Arc<RwLock<Database>>>,
     client: Arc<lfsc::Client>,
     leaser: Arc<Leaser>,
+    syncer: Arc<Syncer>,
 }
 
 impl DatabaseManager {
@@ -29,12 +31,14 @@ impl DatabaseManager {
         pager: Arc<Pager>,
         client: Arc<lfsc::Client>,
         leaser: Arc<Leaser>,
+        syncer: Arc<Syncer>,
     ) -> DatabaseManager {
         DatabaseManager {
             pager,
             databases: HashMap::new(),
             client,
             leaser,
+            syncer,
         }
     }
 
@@ -44,6 +48,7 @@ impl DatabaseManager {
         access: OpenAccess,
     ) -> io::Result<Arc<RwLock<Database>>> {
         if let Some(db) = self.get_database_local(dbname, access)? {
+            self.syncer.open_conn(dbname, db.read().unwrap().pos);
             return Ok(db);
         }
 
@@ -56,6 +61,7 @@ impl DatabaseManager {
             ));
         };
 
+        self.syncer.open_conn(dbname, db.read().unwrap().pos);
         self.databases.insert(dbname.into(), Arc::clone(&db));
 
         Ok(db)
@@ -110,6 +116,7 @@ impl DatabaseManager {
             Arc::clone(&self.pager),
             Arc::clone(&self.client),
             Arc::clone(&self.leaser),
+            Arc::clone(&self.syncer),
         )?))))
     }
 
@@ -130,6 +137,7 @@ pub(crate) struct Database {
     client: Arc<lfsc::Client>,
     pager: Arc<Pager>,
     leaser: Arc<Leaser>,
+    syncer: Arc<Syncer>,
     ltx_path: PathBuf,
     pub(crate) journal_path: PathBuf,
     pub(crate) page_size: Option<ltx::PageSize>,
@@ -137,8 +145,6 @@ pub(crate) struct Database {
     current_db_size: Option<ltx::PageNum>,
     pos: Option<ltx::Pos>,
     dirty_pages: BTreeMap<ltx::PageNum, Option<ltx::Checksum>>,
-    // XXX: we need to use real time here, as monotonic clock may not be adjusted between suspends
-    last_sync_at: time::SystemTime,
     pub(crate) sync_period: time::Duration,
 }
 
@@ -149,6 +155,7 @@ impl Database {
         pager: Arc<Pager>,
         client: Arc<lfsc::Client>,
         leaser: Arc<Leaser>,
+        syncer: Arc<Syncer>,
     ) -> io::Result<Database> {
         let ltx_path = pager.db_path(name).join("ltx");
         let journal_path = pager.db_path(name).join("journal");
@@ -172,8 +179,9 @@ impl Database {
             lock: VfsLock::new(),
             name: name.into(),
             client,
-            leaser,
             pager,
+            leaser,
+            syncer,
             ltx_path,
             journal_path,
             page_size,
@@ -181,7 +189,6 @@ impl Database {
             current_db_size: commit,
             pos,
             dirty_pages: BTreeMap::new(),
-            last_sync_at: time::SystemTime::now(),
             sync_period: time::Duration::from_secs(1),
         })
     }
@@ -466,56 +473,15 @@ impl Database {
     }
 
     pub(crate) fn needs_sync(&self) -> bool {
-        let elapsed = match self.last_sync_at.elapsed() {
-            Ok(dur) => dur,
-            Err(err) => {
-                log::warn!(
-                    "[database] sync: db = {}, clock drift = {:?}, skipping sync",
-                    self.name,
-                    err
-                );
-                return false;
-            }
-        };
+        let remote_pos = self.syncer.get_pos(&self.name);
 
-        !self.sync_period.is_zero() && elapsed > self.sync_period
+        self.pos.is_none() || remote_pos.is_some() && self.pos != remote_pos
     }
 
     pub(crate) fn sync(&mut self) -> io::Result<()> {
-        let pos = match self.client.sync_db(&self.name, self.pos) {
-            // New database, never written to, just skip the sync
-            Err(lfsc::Error::Lfsc(err)) if err.code == "ENODB" => return Ok(()),
-            Err(x) => return Err(x.into()),
-
-            // All pages have changed, clear the cache completely
-            Ok(lfsc::Changes::All(pos)) => {
-                log::debug!(
-                    "[database] sync: db = {}, prev_pos = {}, pos = {}, all pages have changed",
-                    self.name,
-                    PosLogger(&self.pos),
-                    PosLogger(&pos)
-                );
-                self.pager.clear(&self.name)?;
-                pos
-            }
-
-            // Some pages have changed, drop them from the cache
-            Ok(lfsc::Changes::Pages(pos, Some(pgnos))) => {
-                log::debug!(
-                    "[database] sync: db = {}, prev_pos = {}, pos = {}, pages = {}",
-                    self.name,
-                    PosLogger(&self.pos),
-                    PosLogger(&pos),
-                    PageNumLogger(&pgnos)
-                );
-                for pgno in pgnos {
-                    self.pager.del_page(&self.name, pgno)?;
-                }
-                pos
-            }
-
+        let pos = match self.syncer.get_changes(&self.name) {
             // No changes
-            Ok(lfsc::Changes::Pages(pos, None)) => {
+            (pos, None) => {
                 log::debug!(
                     "[database] sync: db = {}, prev_pos = {}, pos = {}, no changes",
                     self.name,
@@ -524,9 +490,42 @@ impl Database {
                 );
                 pos
             }
+
+            // All pages have changed, clear the cache completely
+            (pos, Some(Changes::All)) => {
+                log::debug!(
+                    "[database] sync: db = {}, prev_pos = {}, pos = {}, all pages have changed",
+                    self.name,
+                    PosLogger(&self.pos),
+                    PosLogger(&pos)
+                );
+                if let Err(err) = self.pager.clear(&self.name) {
+                    self.syncer.put_changes(&self.name, Changes::All);
+                    return Err(err);
+                };
+
+                pos
+            }
+
+            // Some pages have changed, drop them from the cache
+            (pos, Some(Changes::Pages(pgnos))) => {
+                log::debug!(
+                    "[database] sync: db = {}, prev_pos = {}, pos = {}, pages = {}",
+                    self.name,
+                    PosLogger(&self.pos),
+                    PosLogger(&pos),
+                    PageNumLogger(&pgnos)
+                );
+                for pgno in &pgnos {
+                    if let Err(err) = self.pager.del_page(&self.name, *pgno) {
+                        self.syncer.put_changes(&self.name, Changes::Pages(pgnos));
+                        return Err(err);
+                    }
+                }
+                pos
+            }
         };
 
-        self.last_sync_at = time::SystemTime::now();
         self.pos = pos;
 
         Ok(())
