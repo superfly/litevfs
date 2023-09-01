@@ -473,13 +473,11 @@ impl Database {
     }
 
     pub(crate) fn needs_sync(&self) -> bool {
-        let remote_pos = self.syncer.get_pos(&self.name);
-
-        self.pos.is_none() || remote_pos.is_some() && self.pos != remote_pos
+        self.syncer.needs_sync(&self.name, self.pos)
     }
 
     pub(crate) fn sync(&mut self) -> io::Result<()> {
-        let pos = match self.syncer.get_changes(&self.name) {
+        let pos = match self.syncer.get_changes(&self.name, self.pos)? {
             // No changes
             (pos, None) => {
                 log::debug!(

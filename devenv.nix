@@ -29,7 +29,6 @@ in {
   };
 
   env = {
-    EMCC_CFLAGS = "--no-entry";
     EM_CACHE = "/tmp/emcache";
   };
 }

@@ -1,8 +1,6 @@
 inputs:
   nixpkgs:
     url: github:nixos/nixpkgs/nixos-unstable
-  nixpkgs-latest:
-    url: github:nixos/nixpkgs?rev=e7f38be3775bab9659575f192ece011c033655f0
   fenix:
     url: github:nix-community/fenix
     inputs:

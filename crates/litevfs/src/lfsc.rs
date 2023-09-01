@@ -142,6 +142,7 @@ impl From<DbChanges> for Changes {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) enum LeaseOp<'a> {
     Acquire(std::time::Duration),
@@ -323,6 +324,7 @@ impl Client {
         Ok(self.call::<DbChanges>("GET", u)?.into())
     }
 
+    #[allow(dead_code)]
     pub(crate) fn acquire_lease(&self, db: &str, op: LeaseOp) -> Result<Lease> {
         log::debug!("[lfscs] acquire_lease: db = {}, op = {}", db, op);
 
@@ -343,6 +345,7 @@ impl Client {
         self.call::<Lease>("POST", u)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn release_lease(&self, db: &str, lease: Lease) -> Result<()> {
         log::debug!("[lfscs] release_lease: db = {}, lease = {}", db, lease.id);
 
@@ -360,6 +363,7 @@ impl Client {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub(crate) fn sync(
         &self,
         positions: HashMap<String, Option<ltx::Pos>>,
