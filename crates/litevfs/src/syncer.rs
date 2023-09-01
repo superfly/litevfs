@@ -148,7 +148,7 @@ mod native {
             use crossbeam_channel::{after, never, select};
 
             loop {
-                let has_dbs = self.inner.lock().unwrap().positions.len() > 0;
+                let has_dbs = !self.inner.lock().unwrap().positions.is_empty();
                 let waiter = if has_dbs {
                     if let Err(err) = self.sync() {
                         log::warn!("[syncer] run: sync failed: {:?}", err);
@@ -228,13 +228,11 @@ mod emscripten {
 
     impl Syncer {
         pub(crate) fn new(client: Arc<lfsc::Client>, period: time::Duration) -> Arc<Syncer> {
-            let syncer = Arc::new(Syncer {
+            Arc::new(Syncer {
                 client,
                 sync_times: Mutex::new(HashMap::new()),
                 period,
-            });
-
-            syncer
+            })
         }
 
         pub(crate) fn open_conn(&self, db: &str, _pos: Option<ltx::Pos>) {
@@ -249,7 +247,7 @@ mod emscripten {
 
         pub(crate) fn needs_sync(&self, db: &str, _pos: Option<ltx::Pos>) -> bool {
             let last_sync = if let Some(last_sync) = self.sync_times.lock().unwrap().get(db) {
-                last_sync.clone()
+                *last_sync
             } else {
                 return false;
             };
@@ -270,11 +268,9 @@ mod emscripten {
         ) -> io::Result<(Option<ltx::Pos>, Option<super::Changes>)> {
             let changes = self.client.sync_db(db, pos)?;
 
-            self.sync_times
-                .lock()
-                .unwrap()
-                .get_mut(db)
-                .map(|l| *l = time::SystemTime::now());
+            if let Some(last) = self.sync_times.lock().unwrap().get_mut(db) {
+                *last = time::SystemTime::now();
+            };
 
             Ok((changes.pos(), changes.into()))
         }

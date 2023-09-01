@@ -5,7 +5,7 @@ pub(crate) use native::{Request, Response};
 pub(crate) use emscripten::{Request, Response};
 
 pub(crate) enum Error {
-    Status(u16, Response),
+    Status(u16, Box<Response>),
     Transport(String),
 }
 
@@ -20,7 +20,7 @@ mod native {
 
     fn map_err(e: ureq::Error) -> super::Error {
         match e {
-            ureq::Error::Status(code, resp) => super::Error::Status(code, Response(resp)),
+            ureq::Error::Status(code, resp) => super::Error::Status(code, Box::new(Response(resp))),
             ureq::Error::Transport(err) => super::Error::Transport(err.to_string()),
         }
     }
@@ -241,7 +241,7 @@ mod emscripten {
 
             match status {
                 200..=299 => Ok(resp),
-                status => Err(super::Error::Status(status, resp)),
+                status => Err(super::Error::Status(status, Box::new(resp))),
             }
         }
     }
