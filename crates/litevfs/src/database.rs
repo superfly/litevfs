@@ -17,6 +17,8 @@ use std::{
 };
 
 const SQLITE_HEADER_SIZE: u64 = 100;
+const SQLITE_WRITE_VERSION_OFFSET: usize = 18;
+const SQLITE_READ_VERSION_OFFSET: usize = 19;
 
 pub(crate) struct DatabaseManager {
     pager: Arc<Pager>,
@@ -144,6 +146,7 @@ pub(crate) struct Database {
     pub(crate) pos: Option<ltx::Pos>,
     dirty_pages: BTreeMap<ltx::PageNum, Option<ltx::Checksum>>,
     pub(crate) sync_period: time::Duration,
+    wal: bool,
 }
 
 impl Database {
@@ -161,15 +164,13 @@ impl Database {
         pager.prepare_db(name)?;
         fs::create_dir_all(&ltx_path)?;
 
-        let (page_size, commit) = match pager.get_page(name, pos, ltx::PageNum::ONE) {
-            Ok(page) => {
-                Database::ensure_supported(name, page.as_ref())?;
-                (
-                    Some(Database::parse_page_size_database(page.as_ref())?),
-                    Some(Database::parse_commit_database(page.as_ref())?),
-                )
-            }
-            Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => (None, None),
+        let (wal, page_size, commit) = match pager.get_page(name, pos, ltx::PageNum::ONE) {
+            Ok(page) => (
+                Database::ensure_supported(name, page.as_ref())?,
+                Some(Database::parse_page_size_database(page.as_ref())?),
+                Some(Database::parse_commit_database(page.as_ref())?),
+            ),
+            Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => (false, None, None),
             Err(err) => return Err(err),
         };
 
@@ -188,28 +189,32 @@ impl Database {
             pos,
             dirty_pages: BTreeMap::new(),
             sync_period: time::Duration::from_secs(1),
+            wal,
         })
     }
 
-    fn ensure_supported(name: &str, page1: &[u8]) -> io::Result<()> {
-        let write_version = u8::from_be(page1[18]);
-        let read_version = u8::from_be(page1[19]);
+    fn ensure_supported(name: &str, page1: &[u8]) -> io::Result<bool> {
+        let write_version = u8::from_be(page1[SQLITE_WRITE_VERSION_OFFSET]);
+        let read_version = u8::from_be(page1[SQLITE_READ_VERSION_OFFSET]);
         let auto_vacuum = u32::from_be_bytes(
             page1[52..56]
                 .try_into()
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
         );
 
-        if write_version == 2 || read_version == 2 {
+        let wal = if write_version == 2 || read_version == 2 {
             log::warn!(
                 "[database] ensure_supported: db = {}, database in WAL mode",
                 name
             );
+            true
             // return Err(io::Error::new(
             //     io::ErrorKind::InvalidData,
             //     "WAL is not supported by LiteVFS",
             // ));
-        }
+        } else {
+            false
+        };
 
         if auto_vacuum > 0 {
             return Err(io::Error::new(
@@ -218,7 +223,7 @@ impl Database {
             ));
         }
 
-        Ok(())
+        Ok(wal)
     }
 
     fn parse_page_size_database(page1: &[u8]) -> io::Result<ltx::PageSize> {
@@ -311,6 +316,14 @@ impl Database {
         self.pager
             .get_page_slice(&self.name, self.pos, number, buf, offset)?;
 
+        if offset as usize <= SQLITE_WRITE_VERSION_OFFSET
+            && offset as usize + buf.len() >= SQLITE_READ_VERSION_OFFSET
+            && self.wal
+        {
+            buf[SQLITE_WRITE_VERSION_OFFSET - offset as usize] = u8::to_be(1);
+            buf[SQLITE_READ_VERSION_OFFSET - offset as usize] = u8::to_be(1);
+        }
+
         Ok(())
     }
 
@@ -323,6 +336,12 @@ impl Database {
         }
 
         _ = self.leaser.get_lease(&self.name)?;
+        if self.wal {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "writing to DB in WAL mode is unsupported",
+            ));
+        }
 
         self.ensure_aligned(buf, offset)?;
         let page_num = self.page_num_for(offset)?;
