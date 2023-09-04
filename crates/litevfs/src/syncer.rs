@@ -185,8 +185,8 @@ mod native {
                 .filter(|(k, _)| inner.conns.contains_key(k))
                 .collect();
             let sync_times = changes
-                .iter()
-                .map(|(k, _)| (k.to_string(), time::SystemTime::now()))
+                .keys()
+                .map(|k| (k.to_string(), time::SystemTime::now()))
                 .collect();
             let changes = changes
                 .into_iter()
