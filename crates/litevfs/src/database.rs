@@ -163,7 +163,7 @@ impl Database {
 
         let (page_size, commit) = match pager.get_page(name, pos, ltx::PageNum::ONE) {
             Ok(page) => {
-                Database::ensure_supported(page.as_ref())?;
+                Database::ensure_supported(name, page.as_ref())?;
                 (
                     Some(Database::parse_page_size_database(page.as_ref())?),
                     Some(Database::parse_commit_database(page.as_ref())?),
@@ -191,7 +191,7 @@ impl Database {
         })
     }
 
-    fn ensure_supported(page1: &[u8]) -> io::Result<()> {
+    fn ensure_supported(name: &str, page1: &[u8]) -> io::Result<()> {
         let write_version = u8::from_be(page1[18]);
         let read_version = u8::from_be(page1[19]);
         let auto_vacuum = u32::from_be_bytes(
@@ -201,10 +201,14 @@ impl Database {
         );
 
         if write_version == 2 || read_version == 2 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "WAL is not supported by LiteVFS",
-            ));
+            log::warn!(
+                "[database] ensure_supported: db = {}, database in WAL mode",
+                name
+            );
+            // return Err(io::Error::new(
+            //     io::ErrorKind::InvalidData,
+            //     "WAL is not supported by LiteVFS",
+            // ));
         }
 
         if auto_vacuum > 0 {
