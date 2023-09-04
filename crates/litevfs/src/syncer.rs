@@ -31,7 +31,7 @@ mod native {
     use std::{
         collections::HashMap,
         io,
-        sync::{Arc, Mutex},
+        sync::{Arc, Condvar, Mutex},
         thread, time,
     };
 
@@ -39,7 +39,9 @@ mod native {
         client: Arc<lfsc::Client>,
         notifier: crossbeam_channel::Sender<()>,
         period: time::Duration,
+
         inner: Mutex<Inner>,
+        cvar: Condvar,
     }
 
     struct Inner {
@@ -49,6 +51,24 @@ mod native {
         changes: HashMap<String, super::Changes>,
         // numer of open connections per DB
         conns: HashMap<String, u32>,
+        // last time when a sync was performed for DB
+        sync_times: HashMap<String, time::SystemTime>,
+    }
+
+    impl Inner {
+        fn time_since_last_sync(&self, db: &str) -> Option<time::Duration> {
+            let last_sync = if let Some(last_sync) = self.sync_times.get(db) {
+                *last_sync
+            } else {
+                return None;
+            };
+
+            if let Ok(dur) = time::SystemTime::now().duration_since(last_sync) {
+                Some(dur)
+            } else {
+                None
+            }
+        }
     }
 
     impl Syncer {
@@ -62,7 +82,9 @@ mod native {
                     positions: HashMap::new(),
                     changes: HashMap::new(),
                     conns: HashMap::new(),
+                    sync_times: HashMap::new(),
                 }),
+                cvar: Condvar::new(),
             });
 
             thread::spawn({
@@ -78,6 +100,7 @@ mod native {
             let mut inner = self.inner.lock().unwrap();
             if !inner.positions.contains_key(db) {
                 inner.positions.insert(db.into(), pos);
+                inner.sync_times.insert(db.into(), time::SystemTime::now());
             }
             inner
                 .conns
@@ -98,6 +121,7 @@ mod native {
             };
 
             if remove {
+                inner.sync_times.remove(db);
                 inner.positions.remove(db);
                 inner.changes.remove(db);
                 inner.conns.remove(db);
@@ -107,16 +131,18 @@ mod native {
         }
 
         pub(crate) fn needs_sync(&self, db: &str, pos: Option<ltx::Pos>) -> bool {
-            let remote_pos = self
-                .inner
-                .lock()
-                .unwrap()
-                .positions
-                .get(db)
-                .copied()
-                .flatten();
+            let inner = self.inner.lock().unwrap();
 
-            pos.is_none() || remote_pos.is_some() || remote_pos != pos
+            let remote_pos = inner.positions.get(db).copied().flatten();
+            if pos.is_none() || remote_pos.is_some() || remote_pos != pos {
+                return true;
+            }
+
+            if let Some(dur) = inner.time_since_last_sync(db) {
+                dur > self.period
+            } else {
+                false
+            }
         }
 
         pub(crate) fn get_changes(
@@ -125,6 +151,11 @@ mod native {
             _pos: Option<ltx::Pos>,
         ) -> io::Result<(Option<ltx::Pos>, Option<super::Changes>)> {
             let mut inner = self.inner.lock().unwrap();
+
+            while inner.time_since_last_sync(db) > Some(self.period) {
+                self.notify();
+                inner = self.cvar.wait(inner).unwrap();
+            }
 
             Ok((
                 inner.positions.get(db).cloned().flatten(),
@@ -151,6 +182,11 @@ mod native {
             let positions = changes
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.pos()))
+                .filter(|(k, _)| inner.conns.contains_key(k))
+                .collect();
+            let sync_times = changes
+                .iter()
+                .map(|(k, _)| (k.to_string(), time::SystemTime::now()))
                 .collect();
             let changes = changes
                 .into_iter()
@@ -162,6 +198,9 @@ mod native {
 
             inner.positions = positions;
             inner.changes = changes;
+            inner.sync_times = sync_times;
+
+            self.cvar.notify_all();
 
             Ok(())
         }

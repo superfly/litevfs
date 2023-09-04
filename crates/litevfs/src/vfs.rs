@@ -67,7 +67,13 @@ impl Vfs for LiteVfs {
                 .unwrap()
                 .get_database(dbname, opts.access)
                 .map(|database| {
-                    let conn_lock = database.read().unwrap().conn_lock();
+                    let (conn_lock, pos) = {
+                        let database = database.read().unwrap();
+
+                        (database.conn_lock(), database.pos)
+                    };
+                    self.syncer.open_conn(dbname, pos);
+
                     LiteHandle::new(LiteDatabaseHandle::new(
                         Arc::clone(&self.pager),
                         Arc::clone(&self.syncer),

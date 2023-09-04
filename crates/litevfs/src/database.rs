@@ -48,7 +48,6 @@ impl DatabaseManager {
         access: OpenAccess,
     ) -> io::Result<Arc<RwLock<Database>>> {
         if let Some(db) = self.get_database_local(dbname, access)? {
-            self.syncer.open_conn(dbname, db.read().unwrap().pos);
             return Ok(db);
         }
 
@@ -61,7 +60,6 @@ impl DatabaseManager {
             ));
         };
 
-        self.syncer.open_conn(dbname, db.read().unwrap().pos);
         self.databases.insert(dbname.into(), Arc::clone(&db));
 
         Ok(db)
@@ -143,7 +141,7 @@ pub(crate) struct Database {
     pub(crate) page_size: Option<ltx::PageSize>,
     committed_db_size: Option<ltx::PageNum>,
     current_db_size: Option<ltx::PageNum>,
-    pos: Option<ltx::Pos>,
+    pub(crate) pos: Option<ltx::Pos>,
     dirty_pages: BTreeMap<ltx::PageNum, Option<ltx::Checksum>>,
     pub(crate) sync_period: time::Duration,
 }
