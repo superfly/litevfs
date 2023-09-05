@@ -22,10 +22,15 @@ in {
     pkgs.rust-bindgen
   ];
 
-  pre-commit.hooks = {
-    cargo-check.enable = true;
-    clippy.enable = true;
-    rustfmt.enable = true;
+  pre-commit = {
+    hooks = {
+      cargo-check.enable = true;
+      clippy.enable = true;
+      rustfmt.enable = true;
+    };
+    settings = {
+      clippy.denyWarnings = true;
+    };
   };
 
   env = {
