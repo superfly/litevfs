@@ -4,7 +4,7 @@ use std::{env, error::Error};
 
 type DynError = Box<dyn Error>;
 
-const SQLITE_VERSION: &'static str = "3430000";
+const SQLITE_VERSION: &str = "3430000";
 
 pub mod tasks {
     use crate::DynError;
