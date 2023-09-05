@@ -35,30 +35,24 @@ The following environment variable are handled by LiteVFS:
  - `LITEFS_CLOUD_CLUSTER` - LiteFS Cloud cluster (optional for cluster-scoped tokens, mandatory otherwise)
  - `LITEFS_CLOUD_HOST` - LiteFS Cloud host (optional, defaults to https://litefs.fly.io)
  - `LITEVFS_CACHE_DIR` - cache directory for databases (optional, random directory under `/tmp` if not specified)
+ - `LITEVFS_LOG_FILE` - log into the given file instead of stderr
 
 The same shared library can be loaded from any language using their SQLite bindings.
 
 ## Building LiteVFS for browsers
 
-First, we need to build LiteVFS static library. To do this, make sure you have Emscripten toolchain installed
-and activeted.
-LiteVFS uses some SQLite APIs which are not available until the final link stage, so we need to tell
-Emscripten compiler to ignore undefined symbols for now:
+The build process uses Emscripten target, thus, Emscripten SDK needs to be installed and configured on the system.
+Refer to Emscripted docs on how to do this. Alternatively, `devenv.nix` file in this repo includes all the
+required dependencies.
 
-```
-$ RUSTFLAGS="-C link-args=-sERROR_ON_UNDEFINED_SYMBOLS=0" cargo build --release --target wasm32-unknown-emscripten
-```
+To build simply do:
 
-The next step is to build SQLite and link it with LiteVFS. This mostly follows the official build process (https://sqlite.org/wasm/doc/trunk/building.md)
-except to the last step where we also link with LiteVFS:
-
-1) Download SQLite sources (not amalgamation!) and run the following:
-
-```
-$ ./configure --enable-all
-$ make sqlite3.c
-$ cd ext/wasm
-$ make sqlite3_wasm_extra_init.c=<litevfs>/target/wasm32-unknown-emscripten/release/liblitevfs.a emcc.flags="-s 'EXTRA_EXPORTED_RUNTIME_METHODS=['ENV']' -s FETCH" release
+```sh
+$ cargo xtask build-wasm
 ```
 
-At this point you should have `jswasm/sqlite3.js` and `jswasm/sqlite3.wasm` files which provide SQLite3 + LiteVFS for browsers.
+The command will build LiteVFS with Emscripten, download SQLite3 sources, build it with Emscripten and link it with LiteVFS.
+At this point you should have `target/sqlite3-wasm/sqlite3.{js,wasm}` files.
+
+Note that since LiteVFS uses synchronous Emscripten's FETCH API, SQLite3 can only be used from a Worker thread, not from the
+main browser UI thread.
