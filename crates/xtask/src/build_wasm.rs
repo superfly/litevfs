@@ -7,11 +7,11 @@ pub fn build_wasm(version: &str) -> Result<(), DynError> {
     let metadata = cargo_metadata::MetadataCommand::new().exec()?;
     let sqlite_dir = metadata
         .target_directory
-        .join(&format!("sqlite-src-{}", version));
+        .join(format!("sqlite-src-{}", version));
     let wasm_dir = metadata.target_directory.join("sqlite3-wasm");
     let zip_name = metadata
         .target_directory
-        .join(&format!("sqlite-src-{}.zip", version));
+        .join(format!("sqlite-src-{}.zip", version));
 
     cmd!(
         "cargo",
