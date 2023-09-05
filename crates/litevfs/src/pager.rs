@@ -1,7 +1,7 @@
 use crate::{lfsc, PosLogger, LITEVFS_IOERR_POS_MISMATCH};
 use bytesize::ByteSize;
 use caches::{Cache, SegmentedCache};
-use ltx::PageChecksum;
+use litetx::{self as ltx, PageChecksum};
 use sqlite_vfs::CodeError;
 use std::{
     ffi, fs,

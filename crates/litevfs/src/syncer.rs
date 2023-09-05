@@ -1,4 +1,5 @@
 use crate::lfsc;
+use litetx as ltx;
 use std::collections::BTreeSet;
 
 #[derive(Debug)]
@@ -28,6 +29,7 @@ pub(crate) use emscripten::Syncer;
 #[cfg(not(target_os = "emscripten"))]
 mod native {
     use crate::lfsc;
+    use litetx as ltx;
     use std::{
         collections::HashMap,
         io,
@@ -252,6 +254,7 @@ mod native {
 #[cfg(target_os = "emscripten")]
 mod emscripten {
     use crate::lfsc;
+    use litetx as ltx;
     use std::{
         collections::HashMap,
         io,

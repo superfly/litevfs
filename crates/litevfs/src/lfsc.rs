@@ -1,4 +1,5 @@
 use crate::{http, PosLogger};
+use litetx as ltx;
 use std::{collections::HashMap, env, fmt, io, sync};
 
 /// All possible errors returned by the LFSC client.
@@ -504,6 +505,7 @@ impl ClientBuilder {
 }
 
 mod option_pos {
+    use litetx as ltx;
     use serde::{
         de::{self, Deserializer},
         ser::{Serialize, SerializeStruct, Serializer},
@@ -554,6 +556,7 @@ mod option_pos {
 #[cfg(test)]
 mod tests {
     use super::{Lease, Page};
+    use litetx as ltx;
     use serde_test::{assert_de_tokens, Token};
 
     #[test]

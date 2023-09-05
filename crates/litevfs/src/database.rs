@@ -6,6 +6,7 @@ use crate::{
     syncer::{Changes, Syncer},
     PageNumLogger, PosLogger,
 };
+use litetx as ltx;
 use sqlite_vfs::OpenAccess;
 use std::{
     collections::{BTreeMap, HashMap},

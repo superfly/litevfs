@@ -8,9 +8,9 @@ mod pager;
 mod syncer;
 mod vfs;
 
+use litetx as ltx;
 use sqlite_vfs::ffi;
 use std::{collections::BTreeSet, fmt};
-pub use vfs::LiteVfs;
 
 /// A custom SQLite error code to indicate that LFSC no longer have the
 /// required state and LiteVFS can't recover from this in the middle of

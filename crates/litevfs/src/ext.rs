@@ -1,4 +1,4 @@
-use crate::{lfsc, LiteVfs};
+use crate::{lfsc, vfs::LiteVfs};
 use rand::distributions::{Alphanumeric, DistString};
 use sqlite_vfs::{ffi, RegisterError};
 use std::{env, fs, process};

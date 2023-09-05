@@ -19,7 +19,8 @@ pub fn build_wasm(version: &str) -> Result<(), DynError> {
         "--target",
         "wasm32-unknown-emscripten",
         "--package",
-        "litevfs"
+        "litevfs",
+        "--release"
     )
     .run()?;
 
