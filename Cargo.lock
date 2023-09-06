@@ -241,9 +241,6 @@ dependencies = [
 [[package]]
 name = "emscripten-sys"
 version = "0.1.0"
-dependencies = [
- "url",
-]
 
 [[package]]
 name = "env_logger"

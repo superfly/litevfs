@@ -3,4 +3,3 @@ name = "emscripten-sys"
 version = "0.1.0"
 
 [dependencies]
-url = "2.4"
