@@ -1,5 +1,7 @@
 # LiteVFS - LiteFS VFS implementation for serverless environments (WIP)
 
+LiteVFS is a Virtual Filesystem extension for SQLite that uses [LiteFS Cloud][litefs-cloud] as a backing store.
+
 ## SQLite CLI
 
 To test with SQLite CLI:
@@ -56,3 +58,5 @@ At this point you should have `target/sqlite3-wasm/sqlite3.{js,wasm}` files.
 
 Note that since LiteVFS uses synchronous Emscripten's FETCH API, SQLite3 can only be used from a Worker thread, not from the
 main browser UI thread.
+
+[litefs-cloud]: https://fly.io/docs/litefs/
