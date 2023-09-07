@@ -1,6 +1,7 @@
 {
   pkgs,
   inputs,
+  lib,
   ...
 }: let
   fenix = inputs.fenix.packages.${builtins.currentSystem};
@@ -11,15 +12,20 @@ in {
     toolchain.rustc = fenix.combine [
       fenix.stable.rustc
       fenix.targets.wasm32-unknown-emscripten.stable.rust-std
-      fenix.targets.wasm32-unknown-unknown.stable.rust-std
     ];
   };
 
   packages = [
-    pkgs.emscripten
-    pkgs.wabt
+    # Basic rust tools
     pkgs.cargo-nextest
     pkgs.rust-bindgen
+
+    # Emscripten target
+    pkgs.emscripten
+    pkgs.wabt
+
+    # NPM packaging
+    pkgs.nodejs
   ];
 
   pre-commit = {

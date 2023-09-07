@@ -50,8 +50,13 @@ pub extern "C" fn sqlite3_litevfs_init(
             let msg = CString::new(err.to_string()).unwrap();
             let msg_slice = msg.to_bytes_with_nul();
             unsafe {
-                *pzErrMsg = (*pApi).malloc64.unwrap()(msg_slice.len() as u64) as *mut i8;
-                ptr::copy(msg_slice.as_ptr() as *const i8, *pzErrMsg, msg_slice.len());
+                *pzErrMsg =
+                    (*pApi).malloc64.unwrap()(msg_slice.len() as u64) as *mut std::ffi::c_char;
+                ptr::copy(
+                    msg_slice.as_ptr() as *const std::ffi::c_char,
+                    *pzErrMsg,
+                    msg_slice.len(),
+                );
             };
             return ffi::SQLITE_ERROR;
         }
