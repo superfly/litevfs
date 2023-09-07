@@ -22,6 +22,12 @@ pub mod tasks {
         Ok(())
     }
 
+    pub fn build_npm_meta() -> Result<(), DynError> {
+        crate::build_npm::build_npm_meta()?;
+
+        Ok(())
+    }
+
     pub fn help() {
         println!(
             "
@@ -30,6 +36,7 @@ Usage: Run with `cargo xtask <task>, e.g. `cargo xtask build-wasm`.
     Tasks:
         build-wasm: Build WASM distribution of SQLite3 + LiteVFS 
         build-npm-binary: Build LiteVFS NPM binary package
+        build-npm-meta: Build LiteVFS NPM meta package
     "
         );
     }
@@ -43,6 +50,7 @@ fn main() -> Result<(), DynError> {
             "--help" => tasks::help(),
             "build-wasm" => tasks::build_wasm()?,
             "build-npm-binary" => tasks::build_npm_binary()?,
+            "build-npm-meta" => tasks::build_npm_meta()?,
             invalid => return Err(format!("Invalid task name: {}", invalid).into()),
         },
     };

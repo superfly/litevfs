@@ -56,3 +56,42 @@ pub fn build_npm_binary() -> Result<(), DynError> {
 
     Ok(())
 }
+
+pub fn build_npm_meta() -> Result<(), DynError> {
+    let metadata = cargo_metadata::MetadataCommand::new().exec()?;
+
+    let pkg_dir = metadata.target_directory.join("npm").join("litevfs");
+    let lib_dir = pkg_dir.join("lib");
+    let version = metadata
+        .packages
+        .iter()
+        .find(|p| p.name == "litevfs")
+        .map(|p| p.version.to_string())
+        .ok_or("Can't find LiteVFS version")?;
+
+    fs::create_dir_all(&pkg_dir)?;
+    fs::create_dir_all(&lib_dir)?;
+
+    fs::copy(
+        metadata
+            .workspace_root
+            .join("npm")
+            .join("litevfs")
+            .join("lib")
+            .join("index.js"),
+        lib_dir.join("index.js"),
+    )?;
+
+    let package_json = fs::read_to_string(
+        metadata
+            .workspace_root
+            .join("npm")
+            .join("litevfs")
+            .join("package.json.tmpl"),
+    )?;
+    let package_json = package_json.replace("{VERSION}", &version);
+
+    fs::write(pkg_dir.join("package.json"), package_json)?;
+
+    Ok(())
+}
