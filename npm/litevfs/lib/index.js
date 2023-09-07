@@ -58,7 +58,7 @@ function Database(filename, options) {
   const extdb = sqlite(":memory:");
   extdb.loadExtension(getLoadablePath());
   extdb.close();
-  
+
   return new sqlite(filename, options);
 }
 
