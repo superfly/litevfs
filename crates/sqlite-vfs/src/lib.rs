@@ -807,6 +807,7 @@ mod vfs {
     ) -> c_int {
         log::trace!("randomness");
 
+        #[allow(clippy::unnecessary_cast)]
         let bytes = slice::from_raw_parts_mut(z_buf_out as *mut i8, n_byte as usize);
         let state = match vfs_state::<V>(p_vfs) {
             Ok(state) => state,
