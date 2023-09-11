@@ -9,6 +9,9 @@ on:
       - synchronize
       - reopened
 
+env:
+  VERSION: "${{ github.event_name == 'release' && github.event.release.name || github.sha }}"
+
 jobs:
   lint:
     name: "Lint"
@@ -47,18 +50,25 @@ jobs:
         include:
           - os: "ubuntu-latest"
             target: "x86_64-unknown-linux-gnu"
+            soname: "liblitevfs.so"
           - os: "ubuntu-latest"
             target: "x86_64-unknown-linux-musl"
+            soname: "liblitevfs.so"
           - os: "ubuntu-latest"
             target: "aarch64-unknown-linux-gnu"
+            soname: "liblitevfs.so"
           - os: "ubuntu-latest"
             target: "aarch64-unknown-linux-musl"
+            soname: "liblitevfs.so"
           - os: "macos-latest"
             target: "x86_64-apple-darwin"
+            soname: "liblitevfs.dylib"
           - os: "macos-latest"
             target: "aarch64-apple-darwin"
+            soname: "liblitevfs.dylib"
           - os: "windows-latest"
             target: "x86_64-pc-windows-msvc"
+            soname: "litevfs.dll"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v3
@@ -74,7 +84,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: cargo build --package litevfs --release
+        run: |
+          cargo build --package litevfs --release
+          cd target/${{ matrix.target }}/release
+          tar -czvf litevfs-${{ env.VERSION }}-${{ matrix.target }}.tar.gz ${{ matrix.soname }}
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: litevfs-${{ env.VERSION }}-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/${{ matrix.soname }}
+          if-no-files-found: error
 
   build-wasm:
     name: "Build WASM"
@@ -90,7 +110,7 @@ jobs:
           toolchain: "stable"
       - uses: mymindstorm/setup-emsdk@v12
         with:
-          version: ${{env.EM_VERSION}}
+          version: ${{ env.EM_VERSION }}
           actions-cache-folder: ${{env.EM_CACHE_FOLDER}}
       - name: Install wasm32-unknown-emscripten target
         run: rustup target add wasm32-unknown-emscripten
@@ -100,8 +120,18 @@ jobs:
       - name: Setup cache
         uses: actions/cache@v2
         with:
-          path: ${{env.EM_CACHE_FOLDER}}
-          key: ${{env.EM_VERSION}}-${{ runner.os }}
+          path: ${{ env.EM_CACHE_FOLDER }}
+          key: ${{ env.EM_VERSION }}-${{ runner.os }}
 
       - name: Build
-        run: cargo xtask build-wasm
+        run: |
+          cargo xtask build-wasm
+          cd target
+          tar -czvf sqlite3-wasm-${{ env.VERSION }}.tar.gz sqlite3-wasm
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: sqlite3-wasm-${{ env.VERSION }}
+          path: target/sqlite3-wasm
+          if-no-files-found: error
