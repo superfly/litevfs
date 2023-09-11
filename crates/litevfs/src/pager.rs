@@ -2,12 +2,11 @@ use crate::{lfsc, PosLogger, LITEVFS_IOERR_POS_MISMATCH};
 use bytesize::ByteSize;
 use caches::{Cache, SegmentedCache};
 use litetx::{self as ltx, PageChecksum};
+use read_write_at::ReadAtMut;
 use sqlite_vfs::CodeError;
 use std::{
     ffi, fs,
     io::{self, Read, Write},
-    mem,
-    os::unix::prelude::{FileExt, OsStrExt},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -289,7 +288,7 @@ impl Pager {
         buf: &mut [u8],
         offset: u64,
     ) -> io::Result<()> {
-        let file = fs::File::open(self.pages_path(db).join(PathBuf::from(pgno)))?;
+        let mut file = fs::File::open(self.pages_path(db).join(PathBuf::from(pgno)))?;
         file.read_exact_at(buf, offset)?;
 
         // Mark the page as recently accessed
@@ -548,10 +547,14 @@ struct FsStats {
     available_space: u64,
 }
 
+#[cfg(unix)]
+#[allow(clippy::unnecessary_cast)]
 fn statvfs<P>(path: P) -> io::Result<FsStats>
 where
     P: AsRef<Path>,
 {
+    use std::{mem, os::unix::prelude::OsStrExt};
+
     let cstr = match ffi::CString::new(path.as_ref().as_os_str().as_bytes()) {
         Ok(cstr) => cstr,
         Err(..) => {
@@ -568,9 +571,70 @@ where
             Err(io::Error::last_os_error())
         } else {
             Ok(FsStats {
-                #[allow(clippy::unnecessary_cast)]
                 available_space: stat.f_frsize as u64 * stat.f_bavail as u64,
             })
         }
+    }
+}
+
+#[cfg(windows)]
+fn statvfs<P>(path: P) -> io::Result<FsStats>
+where
+    P: AsRef<Path>,
+{
+    use std::os::windows::ffi::OsStrExt;
+    use winapi::{
+        shared::minwindef::DWORD,
+        um::fileapi::{GetDiskFreeSpaceW, GetVolumePathNameW},
+    };
+
+    let root_path: &mut [u16] = &mut [0; 261];
+    let path_utf8: Vec<u16> = path
+        .as_ref()
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let available_space = unsafe {
+        if GetVolumePathNameW(
+            path_utf8.as_ptr(),
+            root_path.as_mut_ptr(),
+            root_path.len() as DWORD,
+        ) == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+
+        let mut sectors_per_cluster = 0;
+        let mut bytes_per_sector = 0;
+        let mut number_of_free_clusters = 0;
+        let mut total_number_of_clusters = 0;
+        if GetDiskFreeSpaceW(
+            root_path.as_ptr(),
+            &mut sectors_per_cluster,
+            &mut bytes_per_sector,
+            &mut number_of_free_clusters,
+            &mut total_number_of_clusters,
+        ) == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+
+        let bytes_per_cluster = sectors_per_cluster as u64 * bytes_per_sector as u64;
+        bytes_per_cluster * number_of_free_clusters as u64
+    };
+
+    Ok(FsStats { available_space })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::env::temp_dir;
+
+    #[test]
+    fn statvfs() {
+        let stats = super::statvfs(temp_dir()).expect("statvfs");
+
+        assert!(stats.available_space > 0);
     }
 }
