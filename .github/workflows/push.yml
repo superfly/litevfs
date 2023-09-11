@@ -75,3 +75,33 @@ jobs:
 
       - name: Build
         run: cargo build --package litevfs --release
+
+  build-wasm:
+    name: "Build WASM"
+    runs-on: "ubuntu-latest"
+    env:
+      EM_VERSION: 3.1.42
+      EM_CACHE_FOLDER: 'emsdk-cache'
+
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: "stable"
+      - uses: mymindstorm/setup-emsdk@v12
+        with:
+          version: ${{env.EM_VERSION}}
+          actions-cache-folder: ${{env.EM_CACHE_FOLDER}}
+      - name: Install wasm32-unknown-emscripten target
+        run: rustup target add wasm32-unknown-emscripten
+      - name: Install WABT
+        run: sudo apt-get install -y wabt
+      - uses: Swatinem/rust-cache@v2
+      - name: Setup cache
+        uses: actions/cache@v2
+        with:
+          path: ${{env.EM_CACHE_FOLDER}}
+          key: ${{env.EM_VERSION}}-${{ runner.os }}
+
+      - name: Build
+        run: cargo xtask build-wasm
