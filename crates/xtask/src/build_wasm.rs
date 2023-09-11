@@ -24,7 +24,7 @@ pub fn build_wasm(version: &str) -> Result<(), DynError> {
     )
     .run()?;
 
-    if !sqlite_dir.exists() {
+    if !zip_name.exists() {
         println!("Downloading SQLite v{}", version);
         cmd!(
             "curl",
@@ -34,8 +34,13 @@ pub fn build_wasm(version: &str) -> Result<(), DynError> {
             format!("https://sqlite.org/2023/sqlite-src-{}.zip", version)
         )
         .run()?;
-        cmd!("unzip", "-d", &metadata.target_directory, &zip_name).run()?;
     }
+
+    if sqlite_dir.exists() {
+        fs::remove_dir_all(&sqlite_dir)?;
+    }
+
+    cmd!("unzip", "-d", &metadata.target_directory, &zip_name).run()?;
 
     env::set_current_dir(sqlite_dir)?;
 
