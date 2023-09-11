@@ -1,7 +1,6 @@
 {
   pkgs,
   inputs,
-  lib,
   ...
 }: let
   fenix = inputs.fenix.packages.${builtins.currentSystem};
