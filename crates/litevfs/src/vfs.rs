@@ -9,10 +9,10 @@ use crate::{
 use bytesize::ByteSize;
 use humantime::{format_duration, parse_duration};
 use rand::Rng;
+use read_write_at::{ReadAtMut, WriteAtMut};
 use sqlite_vfs::{LockKind, OpenAccess, OpenKind, OpenOptions, Vfs};
 use std::{
     fs, io,
-    os::unix::prelude::FileExt,
     path::{Path, PathBuf},
     process,
     sync::{

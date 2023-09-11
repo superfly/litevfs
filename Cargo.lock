@@ -442,6 +442,7 @@ dependencies = [
  "litetx",
  "log",
  "rand",
+ "read_write_at",
  "serde",
  "serde_json",
  "serde_test",
@@ -452,6 +453,7 @@ dependencies = [
  "time",
  "ureq",
  "url",
+ "winapi",
 ]
 
 [[package]]
@@ -562,6 +564,12 @@ checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 dependencies = [
  "getrandom",
 ]
+
+[[package]]
+name = "read_write_at"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ebe895421d01c713cedcbcdf1c495ad97f552c8c0b5b8c041791e4c871a5162f"
 
 [[package]]
 name = "ring"

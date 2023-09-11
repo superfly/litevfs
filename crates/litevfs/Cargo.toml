@@ -13,10 +13,10 @@ crossbeam-channel = "0.5"
 env_logger = { version = "0.10", default-features = false }
 hex = "0.4"
 humantime = "2.1"
-libc = "0.2"
 log = "0.4"
 litetx = "0.1"
 rand = "0.8"
+read_write_at = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_with = { version = "3.2", features = ["base64", "macros"] }
@@ -25,6 +25,12 @@ sqlite-vfs = { path = "../sqlite-vfs", features = ["syscall", "loadext"] }
 time = { version = "0.3", features = ["std", "macros", "serde", "parsing"] }
 thiserror = "1.0"
 url = "2.4"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["std", "fileapi"] }
 
 [target.'cfg(not(target_os = "emscripten"))'.dependencies]
 ureq = { version = "2.7", features = ["json"] }
