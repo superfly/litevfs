@@ -1,58 +1,74 @@
 mod build_npm;
 mod build_wasm;
 
-use std::{env, error::Error};
+use clap::{Arg, Command};
+use std::{error::Error, path::PathBuf};
 
 type DynError = Box<dyn Error>;
 
-const SQLITE_VERSION: &str = "3430000";
-
-pub mod tasks {
-    use crate::DynError;
-
-    pub fn build_wasm() -> Result<(), DynError> {
-        crate::build_wasm::build_wasm(crate::SQLITE_VERSION)?;
-
-        Ok(())
-    }
-
-    pub fn build_npm_binary() -> Result<(), DynError> {
-        crate::build_npm::build_npm_binary()?;
-
-        Ok(())
-    }
-
-    pub fn build_npm_meta() -> Result<(), DynError> {
-        crate::build_npm::build_npm_meta()?;
-
-        Ok(())
-    }
-
-    pub fn help() {
-        println!(
-            "
-Usage: Run with `cargo xtask <task>, e.g. `cargo xtask build-wasm`.
-
-    Tasks:
-        build-wasm: Build WASM distribution of SQLite3 + LiteVFS 
-        build-npm-binary: Build LiteVFS NPM binary package
-        build-npm-meta: Build LiteVFS NPM meta package
-    "
-        );
-    }
-}
+const DEFAULT_SQLITE_VERSION: &str = "3430000";
 
 fn main() -> Result<(), DynError> {
-    let task = env::args().nth(1);
-    match task {
-        None => tasks::help(),
-        Some(t) => match t.as_str() {
-            "--help" => tasks::help(),
-            "build-wasm" => tasks::build_wasm()?,
-            "build-npm-binary" => tasks::build_npm_binary()?,
-            "build-npm-meta" => tasks::build_npm_meta()?,
-            invalid => return Err(format!("Invalid task name: {}", invalid).into()),
-        },
+    let matches = Command::new("xtask")
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .subcommand(
+            Command::new("build-wasm")
+                .about("Build SQLite3 + LiteVFS WASM distribution")
+                .arg(
+                    Arg::new("version")
+                        .short('v')
+                        .long("version")
+                        .default_value(DEFAULT_SQLITE_VERSION)
+                        .help("SQLite3 version"),
+                ),
+        )
+        .subcommand(Command::new("build-npm-meta").about("Build LiteVFS NPM meta package"))
+        .subcommand(
+            Command::new("build-npm-binary")
+                .about("Build LiteVFS binary NPM package")
+                .arg(
+                    Arg::new("lib")
+                        .short('l')
+                        .long("lib")
+                        .required(true)
+                        .value_parser(clap::builder::ValueParser::path_buf())
+                        .help("Path to LiteVFS shared library"),
+                )
+                .arg(
+                    Arg::new("cpu")
+                        .short('c')
+                        .long("cpu")
+                        .required(true)
+                        .help("CPU architecture"),
+                )
+                .arg(
+                    Arg::new("os")
+                        .short('o')
+                        .long("os")
+                        .required(true)
+                        .help("Target OS"),
+                )
+                .arg(Arg::new("abi").short('a').long("abi").help("System ABI")),
+        )
+        .get_matches();
+
+    match matches.subcommand() {
+        Some(("build-wasm", sub_matches)) => crate::build_wasm::build_wasm(
+            sub_matches
+                .get_one::<String>("version")
+                .expect("`version` is required"),
+        )?,
+        Some(("build-npm-meta", _)) => crate::build_npm::build_npm_meta()?,
+        Some(("build-npm-binary", sub_matches)) => {
+            crate::build_npm::build_npm_binary(
+                sub_matches.get_one::<PathBuf>("lib").cloned().unwrap(),
+                sub_matches.get_one::<String>("cpu").cloned().unwrap(),
+                sub_matches.get_one::<String>("os").cloned().unwrap(),
+                sub_matches.get_one::<String>("abi").cloned(),
+            )?;
+        }
+        _ => unreachable!(""),
     };
 
     Ok(())

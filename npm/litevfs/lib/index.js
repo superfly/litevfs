@@ -9,12 +9,19 @@ const supportedPlatforms = [
   ["darwin", "x64"],
   ["darwin", "arm64"],
   ["linux", "x64"],
+  ["linux", "arm64"],
+  ["windows", "x64"],
 ];
 
 function validPlatform(platform, arch) {
   return (
     supportedPlatforms.find(([p, a]) => platform == p && arch === a) !== null
   );
+}
+
+function extensionPrefix(platform) {
+  if (platform == "win32") return "";
+  return "lib";
 }
 
 function extensionSuffix(platform) {
@@ -24,8 +31,23 @@ function extensionSuffix(platform) {
 }
 
 function platformPackageName(platform, arch) {
+  function isMusl() {
+    if (!process.report || typeof process.report.getReport !== 'function') {
+      try {
+        return readFileSync('/usr/bin/ldd', 'utf8').includes('musl')
+      } catch (e) {
+        return true
+      }
+    } else {
+      const { glibcVersionRuntime } = process.report.getReport().header
+      return !glibcVersionRuntime
+    }
+  }
+
   const os = platform === "win32" ? "windows" : platform;
-  return `litevfs-${os}-${arch}`;
+  const abi = platform == "linux" ? (isMusl() ? "-musl" : "-gnu") : "";
+
+  return `litevfs-${os}-${arch}${abi}`;
 }
 
 function getLoadablePath() {
@@ -43,7 +65,7 @@ function getLoadablePath() {
     "..",
     packageName,
     "lib",
-    `liblitevfs.${extensionSuffix(process.platform)}`
+    `${extensionPrefix(process.platform)}litevfs.${extensionSuffix(process.platform)}`
   );
   if (!fs.statSync(loadablePath, { throwIfNoEntry: false })) {
     throw new Error(
