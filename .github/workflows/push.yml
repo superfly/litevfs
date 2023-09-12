@@ -135,3 +135,37 @@ jobs:
           name: sqlite3-wasm-${{ env.VERSION }}
           path: target/sqlite3-wasm
           if-no-files-found: error
+
+  build-npm:
+    name: "Build NPM packages"
+    runs-on: "ubuntu-latest"
+    needs: "build"
+
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: "stable"
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v3
+        with:
+          node-version: 18
+      - uses: actions/download-artifact@v3
+        with:
+          path: /tmp/litevfs
+      - name: "Build NPM packages"
+        run: |
+          cargo xtask build-npm-meta
+          cargo xtask build-npm-binary --lib /tmp/litevfs/litevfs-${{ env.VERSION }}-x86_64-unknown-linux-gnu/liblitevfs.so --cpu x64 --os linux --abi gnu
+          cargo xtask build-npm-binary --lib /tmp/litevfs/litevfs-${{ env.VERSION }}-x86_64-unknown-linux-musl/liblitevfs.so --cpu x64 --os linux --abi musl
+          cargo xtask build-npm-binary --lib /tmp/litevfs/litevfs-${{ env.VERSION }}-aarch64-unknown-linux-gnu/liblitevfs.so --cpu arm64 --os linux --abi gnu
+          cargo xtask build-npm-binary --lib /tmp/litevfs/litevfs-${{ env.VERSION }}-aarch64-unknown-linux-musl/liblitevfs.so --cpu arm64 --os linux --abi musl
+          cargo xtask build-npm-binary --lib /tmp/litevfs/litevfs-${{ env.VERSION }}-x86_64-apple-darwin/liblitevfs.dylib --cpu x64 --os darwin
+          cargo xtask build-npm-binary --lib /tmp/litevfs/litevfs-${{ env.VERSION }}-aarch64-apple-darwin/liblitevfs.dylib --cpu arm64 --os darwin
+          cargo xtask build-npm-binary --lib /tmp/litevfs/litevfs-${{ env.VERSION }}-x86_64-pc-windows-msvc/litevfs.dll --cpu x64 --os windows
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: npm-packages-${{ env.VERSION }}
+          path: target/npm
+          if-no-files-found: error

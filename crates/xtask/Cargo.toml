@@ -7,5 +7,6 @@ edition = "2021"
 
 [dependencies]
 cargo_metadata = "0.17"
+clap = "4.4"
 duct = "0.13"
 current_platform = "0.2"

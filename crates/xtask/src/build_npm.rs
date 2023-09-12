@@ -1,28 +1,23 @@
-use current_platform::CURRENT_PLATFORM;
 use duct::cmd;
-use std::fs;
+use std::{env, fs, path::PathBuf};
 
 use crate::DynError;
 
-fn rust_target_to_npm(target: &str) -> Result<(&'static str, &'static str), DynError> {
-    match target {
-        "x86_64-unknown-linux-gnu" => Ok(("x64", "linux")),
-        "aarch64-unknown-linux-gnu" => Ok(("arm64", "linux")),
-        "x86_64-apple-darwin" => Ok(("x64", "darwin")),
-        "aarch64-apple-darwin" => Ok(("arm64", "darwin")),
-        _ => Err(format!("unknown target {}", target).into()),
-    }
-}
-
-pub fn build_npm_binary() -> Result<(), DynError> {
+pub fn build_npm_binary(
+    lib: PathBuf,
+    cpu: String,
+    os: String,
+    abi: Option<String>,
+) -> Result<(), DynError> {
     let metadata = cargo_metadata::MetadataCommand::new().exec()?;
-
-    let (arch, os) = rust_target_to_npm(CURRENT_PLATFORM)?;
-    let pkg_dir = metadata
-        .target_directory
-        .join("npm")
-        .join(format!("litevfs-{}-{}", os, arch));
+    let pkg_dir = env::temp_dir().join(if let Some(ref abi) = abi {
+        format!("litevfs-{}-{}-{}", os, cpu, abi)
+    } else {
+        format!("litevfs-{}-{}", os, cpu)
+    });
     let lib_dir = pkg_dir.join("lib");
+    let npm_dir = metadata.target_directory.join("npm");
+
     let version = metadata
         .packages
         .iter()
@@ -30,38 +25,42 @@ pub fn build_npm_binary() -> Result<(), DynError> {
         .map(|p| p.version.to_string())
         .ok_or("Can't find LiteVFS version")?;
 
-    cmd!("cargo", "build", "--package", "litevfs", "--release").run()?;
-
     fs::create_dir_all(&pkg_dir)?;
     fs::create_dir_all(&lib_dir)?;
+    fs::create_dir_all(&npm_dir)?;
 
-    fs::copy(
-        metadata
-            .target_directory
-            .join("release")
-            .join("liblitevfs.so"),
-        lib_dir.join("liblitevfs.so"),
-    )?;
+    fs::copy(&lib, lib_dir.join(lib.file_name().unwrap()))?;
     let package_json = fs::read_to_string(
         metadata
             .workspace_root
             .join("npm")
             .join("package.json.tmpl"),
     )?;
-    let package_json = package_json.replace("{OS}", os);
-    let package_json = package_json.replace("{ARCH}", arch);
-    let package_json = package_json.replace("{VERSION}", &version);
+    let package_json = package_json
+        .replace("{OS}", &os)
+        .replace("{ARCH}", &cpu)
+        .replace("{VERSION}", &version);
+    let package_json = if let Some(abi) = abi {
+        package_json.replace("{ABI}", &format!("-{}", abi))
+    } else {
+        package_json.replace("{ABI}", "")
+    };
 
     fs::write(pkg_dir.join("package.json"), package_json)?;
+
+    env::set_current_dir(npm_dir)?;
+
+    cmd!("npm", "pack", pkg_dir).run()?;
 
     Ok(())
 }
 
 pub fn build_npm_meta() -> Result<(), DynError> {
     let metadata = cargo_metadata::MetadataCommand::new().exec()?;
-
-    let pkg_dir = metadata.target_directory.join("npm").join("litevfs");
+    let pkg_dir = env::temp_dir().join("litevfs-meta");
     let lib_dir = pkg_dir.join("lib");
+    let npm_dir = metadata.target_directory.join("npm");
+
     let version = metadata
         .packages
         .iter()
@@ -71,6 +70,7 @@ pub fn build_npm_meta() -> Result<(), DynError> {
 
     fs::create_dir_all(&pkg_dir)?;
     fs::create_dir_all(&lib_dir)?;
+    fs::create_dir_all(&npm_dir)?;
 
     fs::copy(
         metadata
@@ -92,6 +92,10 @@ pub fn build_npm_meta() -> Result<(), DynError> {
     let package_json = package_json.replace("{VERSION}", &version);
 
     fs::write(pkg_dir.join("package.json"), package_json)?;
+
+    env::set_current_dir(npm_dir)?;
+
+    cmd!("npm", "pack", pkg_dir).run()?;
 
     Ok(())
 }
