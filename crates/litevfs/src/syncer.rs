@@ -192,15 +192,15 @@ mod native {
             log::debug!("[syncer] sync: positions = {:?}", old_positions);
             let changes = self.client.sync(&old_positions)?;
 
-            let current_positions = self.inner.lock().unwrap().positions.clone();
-
             let mut inner = self.inner.lock().unwrap();
-            let positions = changes
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.pos()))
-                .filter(|(k, _)| inner.conns.contains_key(k))
+
+            let positions = inner
+                .positions
+                .keys()
+                .map(|k| (k.to_string(), changes.get(k).and_then(|v| v.pos())))
                 .collect();
-            let sync_times = changes
+            let sync_times = inner
+                .positions
                 .keys()
                 .map(|k| (k.to_string(), time::SystemTime::now()))
                 .collect();
@@ -208,7 +208,7 @@ mod native {
                 .into_iter()
                 .filter_map(|(k, v)| {
                     let changes = merge_changes(
-                        if old_positions.get(&k) == current_positions.get(&k) {
+                        if old_positions.get(&k) == inner.positions.get(&k) {
                             v.into()
                         } else {
                             None
