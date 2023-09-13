@@ -160,7 +160,7 @@ mod native {
             }
 
             Ok((
-                inner.positions.get(db).cloned().flatten(),
+                inner.positions.get(db).copied().flatten(),
                 inner.changes.remove(db),
             ))
         }
@@ -173,12 +173,26 @@ mod native {
             }
         }
 
+        pub(crate) fn set_pos(&self, db: &str, pos: Option<ltx::Pos>) {
+            let pos = if let Some(pos) = pos { pos } else { return };
+
+            let mut inner = self.inner.lock().unwrap();
+            if matches!(inner.positions.get(db), Some(Some(remote_pos)) if remote_pos.txid > pos.txid)
+            {
+                return;
+            }
+
+            inner.positions.insert(db.to_string(), Some(pos));
+            inner.changes.remove(db);
+        }
+
         pub(crate) fn sync(&self) -> io::Result<()> {
-            let positions = self.inner.lock().unwrap().positions.clone();
+            let old_positions = self.inner.lock().unwrap().positions.clone();
 
-            log::debug!("[syncer] sync: positions = {:?}", positions);
+            log::debug!("[syncer] sync: positions = {:?}", old_positions);
+            let changes = self.client.sync(&old_positions)?;
 
-            let changes = self.client.sync(positions)?;
+            let current_positions = self.inner.lock().unwrap().positions.clone();
 
             let mut inner = self.inner.lock().unwrap();
             let positions = changes
@@ -193,7 +207,14 @@ mod native {
             let changes = changes
                 .into_iter()
                 .filter_map(|(k, v)| {
-                    let changes = merge_changes(v.into(), inner.changes.remove(&k))?;
+                    let changes = merge_changes(
+                        if old_positions.get(&k) == current_positions.get(&k) {
+                            v.into()
+                        } else {
+                            None
+                        },
+                        inner.changes.remove(&k),
+                    )?;
                     Some((k, changes))
                 })
                 .collect();
@@ -322,5 +343,7 @@ mod emscripten {
         pub(crate) fn sync(&self) -> io::Result<()> {
             Ok(())
         }
+
+        pub(crate) fn set_pos(&self, _db: &str, _pos: Option<ltx::Pos>) {}
     }
 }

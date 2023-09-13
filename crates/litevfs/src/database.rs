@@ -425,6 +425,7 @@ impl Database {
         };
 
         self.pos = Some(pos);
+        self.syncer.set_pos(&self.name, self.pos);
 
         Ok(())
     }
