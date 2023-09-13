@@ -78,7 +78,7 @@ function getLoadablePath() {
 
 function Database(filename, options) {
   const extdb = sqlite(":memory:");
-  extdb.loadExtension(getLoadablePath());
+  extdb.loadExtension(getLoadablePath(), "sqlite3_litevfs_init_default_vfs");
   extdb.close();
 
   return new sqlite(filename, options);

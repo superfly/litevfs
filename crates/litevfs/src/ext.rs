@@ -39,6 +39,27 @@ pub extern "C" fn sqlite3_litevfs_init(
     pzErrMsg: *mut *mut std::ffi::c_char,
     pApi: *mut ffi::sqlite3_api_routines,
 ) -> std::ffi::c_int {
+    litevfs_init(pzErrMsg, pApi, false)
+}
+
+#[no_mangle]
+#[cfg(not(target_os = "emscripten"))]
+#[allow(non_snake_case)]
+pub extern "C" fn sqlite3_litevfs_init_default_vfs(
+    _db: *mut ffi::sqlite3,
+    pzErrMsg: *mut *mut std::ffi::c_char,
+    pApi: *mut ffi::sqlite3_api_routines,
+) -> std::ffi::c_int {
+    litevfs_init(pzErrMsg, pApi, true)
+}
+
+#[cfg(not(target_os = "emscripten"))]
+#[allow(non_snake_case)]
+fn litevfs_init(
+    pzErrMsg: *mut *mut std::ffi::c_char,
+    pApi: *mut ffi::sqlite3_api_routines,
+    as_default: bool,
+) -> std::ffi::c_int {
     use std::{ffi::CString, ptr};
 
     init_logger();
@@ -69,7 +90,7 @@ pub extern "C" fn sqlite3_litevfs_init(
     let code = match unsafe { sqlite_vfs::DynamicExtension::build(pApi) }.register(
         "litevfs",
         LiteVfs::new(cache_dir, client),
-        true,
+        as_default,
     ) {
         Ok(_) => ffi::SQLITE_OK_LOAD_PERMANENTLY,
         Err(RegisterError::Nul(_)) => ffi::SQLITE_ERROR,
