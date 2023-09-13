@@ -118,7 +118,7 @@ jobs:
         run: sudo apt-get install -y wabt
       - uses: Swatinem/rust-cache@v2
       - name: Setup cache
-        uses: actions/cache@v2
+        uses: actions/cache@v3
         with:
           path: ${{ env.EM_CACHE_FOLDER }}
           key: ${{ env.EM_VERSION }}-${{ runner.os }}
