@@ -367,7 +367,7 @@ impl Client {
     #[allow(dead_code)]
     pub(crate) fn sync(
         &self,
-        positions: HashMap<String, Option<ltx::Pos>>,
+        positions: &HashMap<String, Option<ltx::Pos>>,
     ) -> Result<HashMap<String, Changes>> {
         log::debug!("[lfscs] sync: positions = {:?}", positions);
 
@@ -379,8 +379,8 @@ impl Client {
         struct Helper(#[serde(with = "option_pos")] Option<ltx::Pos>);
 
         #[derive(serde::Serialize)]
-        struct SyncRequest {
-            positions: HashMap<String, Helper>,
+        struct SyncRequest<'a> {
+            positions: HashMap<&'a str, Helper>,
         }
 
         #[derive(serde::Deserialize)]
@@ -388,8 +388,10 @@ impl Client {
             changes: HashMap<String, DbChanges>,
         }
 
-        let positions: HashMap<String, Helper> =
-            positions.into_iter().map(|(k, v)| (k, Helper(v))).collect();
+        let positions: HashMap<&str, Helper> = positions
+            .iter()
+            .map(|(k, &v)| (k.as_str(), Helper(v)))
+            .collect();
 
         let req = self.make_request("POST", u);
         let resp = self.process_response(req.send_json(SyncRequest { positions }))?;
