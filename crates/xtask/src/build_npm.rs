@@ -72,15 +72,16 @@ pub fn build_npm_meta() -> Result<(), DynError> {
     fs::create_dir_all(&lib_dir)?;
     fs::create_dir_all(&npm_dir)?;
 
-    fs::copy(
+    for file in fs::read_dir(
         metadata
             .workspace_root
             .join("npm")
             .join("litevfs")
-            .join("lib")
-            .join("index.js"),
-        lib_dir.join("index.js"),
-    )?;
+            .join("lib"),
+    )? {
+        let file = file?;
+        fs::copy(&file.path(), lib_dir.join(file.file_name()))?;
+    }
 
     let package_json = fs::read_to_string(
         metadata
