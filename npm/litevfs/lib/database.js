@@ -3,7 +3,6 @@ const sqlite = require('better-sqlite3');
 const path = require('path');
 const process = require('node:process');
 const fs = require('node:fs');
-const child_process = require('node:child_process');
 
 
 const supportedPlatforms = [
@@ -68,9 +67,6 @@ function getLoadablePath() {
   const packageName = platformPackageName(process.platform, process.arch);
   const fileName = `${extensionPrefix(process.platform)}litevfs.${extensionSuffix(process.platform)}`;
   const loadablePath = requireFunc.resolve(packageName + "/lib/" + fileName);
-  child_process.exec('ldd ' + loadablePath, (error, stdout, stderr) => {
-    throw new Error(stdout);
-  });
   if (!fs.statSync(loadablePath, { throwIfNoEntry: false })) {
     throw new Error(
       `Loadble extension for litevfs not found. Was the ${packageName} package installed? Avoid using the --no-optional flag, as the optional dependencies for litevfs are required.`
