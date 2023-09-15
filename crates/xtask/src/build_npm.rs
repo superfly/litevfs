@@ -59,6 +59,7 @@ pub fn build_npm_meta() -> Result<(), DynError> {
     let metadata = cargo_metadata::MetadataCommand::new().exec()?;
     let pkg_dir = env::temp_dir().join("litevfs-meta");
     let lib_dir = pkg_dir.join("lib");
+    let scripts_dir = pkg_dir.join("scripts");
     let npm_dir = metadata.target_directory.join("npm");
 
     let version = metadata
@@ -70,6 +71,7 @@ pub fn build_npm_meta() -> Result<(), DynError> {
 
     fs::create_dir_all(&pkg_dir)?;
     fs::create_dir_all(&lib_dir)?;
+    fs::create_dir_all(&scripts_dir)?;
     fs::create_dir_all(&npm_dir)?;
 
     for file in fs::read_dir(
@@ -81,6 +83,17 @@ pub fn build_npm_meta() -> Result<(), DynError> {
     )? {
         let file = file?;
         fs::copy(&file.path(), lib_dir.join(file.file_name()))?;
+    }
+
+    for file in fs::read_dir(
+        metadata
+            .workspace_root
+            .join("npm")
+            .join("litevfs")
+            .join("scripts"),
+    )? {
+        let file = file?;
+        fs::copy(&file.path(), scripts_dir.join(file.file_name()))?;
     }
 
     let package_json = fs::read_to_string(
