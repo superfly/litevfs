@@ -18,9 +18,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "stable"
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
 
       - name: cargo fmt
@@ -35,9 +35,9 @@ jobs:
     runs-on: "ubuntu-latest"
     steps:
       - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "stable"
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
 
       - name: Run unit tests
@@ -79,10 +79,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "stable"
-          target: ${{ matrix.target }}
+          targets: ${{ matrix.target }}
+          components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
 
@@ -114,15 +114,14 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "stable"
+          targets: wasm32-unknown-emscripten
+          components: clippy, rustfmt
       - uses: mymindstorm/setup-emsdk@v12
         with:
           version: ${{ env.EM_VERSION }}
           actions-cache-folder: ${{env.EM_CACHE_FOLDER}}
-      - name: Install wasm32-unknown-emscripten target
-        run: rustup target add wasm32-unknown-emscripten
       - name: Install WABT
         run: sudo apt-get install -y wabt
       - uses: Swatinem/rust-cache@v2
@@ -152,9 +151,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "stable"
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v3
         with:
