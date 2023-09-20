@@ -2,7 +2,7 @@ use crate::{
     leaser::Leaser,
     lfsc,
     locks::{ConnLock, VfsLock},
-    pager::{PageRef, Pager},
+    pager::{PageRef, PageSource, Pager},
     syncer::{Changes, Syncer},
     PageNumLogger, PosLogger,
 };
@@ -306,7 +306,12 @@ impl Database {
         Ok(self.page_size()?.into_inner() as u64 * commit.into_inner() as u64)
     }
 
-    pub(crate) fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
+    pub(crate) fn read_at(
+        &self,
+        buf: &mut [u8],
+        offset: u64,
+        local_only: bool,
+    ) -> io::Result<PageSource> {
         let (number, offset) = if offset <= SQLITE_HEADER_SIZE {
             (ltx::PageNum::ONE, offset)
         } else {
@@ -314,8 +319,9 @@ impl Database {
             (self.page_num_for(offset)?, 0)
         };
 
-        self.pager
-            .get_page_slice(&self.name, self.pos, number, buf, offset)?;
+        let source = self
+            .pager
+            .get_page_slice(&self.name, self.pos, number, buf, offset, local_only)?;
 
         if offset as usize <= SQLITE_WRITE_VERSION_OFFSET
             && offset as usize + buf.len() >= SQLITE_READ_VERSION_OFFSET
@@ -325,7 +331,7 @@ impl Database {
             buf[SQLITE_READ_VERSION_OFFSET - offset as usize] = u8::to_be(1);
         }
 
-        Ok(())
+        Ok(source)
     }
 
     pub(crate) fn write_at(&mut self, buf: &[u8], offset: u64) -> io::Result<()> {

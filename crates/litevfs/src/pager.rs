@@ -15,6 +15,11 @@ use std::{
 };
 use string_interner::{DefaultSymbol, StringInterner};
 
+pub(crate) enum PageSource {
+    Local,
+    Remote,
+}
+
 /// [Pager] manages SQLite page data. It uses local filesystem to cache
 /// the pages and when the pages are absent in the cache, requests them from LFSC.
 pub(crate) struct Pager {
@@ -110,21 +115,23 @@ impl Pager {
         pgno: ltx::PageNum,
         buf: &mut [u8],
         offset: u64,
-    ) -> io::Result<()> {
+        local_only: bool,
+    ) -> io::Result<PageSource> {
         log::debug!(
-            "[pager] get_page_slice: db = {}, pos = {}, pgno = {}, len = {}, offset = {}",
+            "[pager] get_page_slice: db = {}, pos = {}, pgno = {}, len = {}, offset = {}, local_only = {}",
             db,
             PosLogger(&pos),
             pgno,
             buf.len(),
             offset,
+            local_only,
         );
 
         // Request the page either from local cache or from LFSC and convert
         // io::ErrorKind::NotFound errors to io::ErrorKind::UnexpectedEof, as
         // this is what local IO will return in case we read past the file.
         // TODO: we may need to suppress duplicated calls to the same page here.
-        let r = match self.get_page_slice_inner(db, pos, pgno, buf, offset) {
+        let r = match self.get_page_slice_inner(db, pos, pgno, buf, offset, local_only) {
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
                 Err(io::ErrorKind::UnexpectedEof.into())
             }
@@ -135,12 +142,13 @@ impl Pager {
         match r {
             Err(err) => {
                 log::warn!(
-                    "[pager] get_page_slice: db = {}, pos = {}, pgno = {}, len = {}, offset = {}: {:?}",
+                    "[pager] get_page_slice: db = {}, pos = {}, pgno = {}, len = {}, offset = {}, local_only = {}: {:?}",
                     db,
                     PosLogger(&pos),
                     pgno,
                     buf.len(),
                     offset,
+                    local_only,
                     err
                 );
                 Err(err)
@@ -250,18 +258,26 @@ impl Pager {
         pgno: ltx::PageNum,
         buf: &mut [u8],
         offset: u64,
-    ) -> io::Result<()> {
+        local_only: bool,
+    ) -> io::Result<PageSource> {
         match self.get_page_slice_local(db, pos, pgno, buf, offset) {
-            Ok(page) => return Ok(page),
+            Ok(_) => return Ok(PageSource::Local),
             Err(err) if err.kind() != io::ErrorKind::NotFound => return Err(err),
             _ => (),
         };
+
+        if local_only {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "local_only page not found in cache",
+            ));
+        }
 
         let page = self.get_page_remote(db, pos, pgno)?;
         let offset = offset as usize;
         buf.copy_from_slice(&page.as_ref()[offset..offset + buf.len()]);
 
-        Ok(())
+        Ok(PageSource::Remote)
     }
 
     fn get_page_local(
