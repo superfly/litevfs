@@ -3,7 +3,7 @@ use crate::{
     leaser::Leaser,
     lfsc,
     locks::{ConnLock, VfsLock},
-    pager::Pager,
+    pager::{PageSource, Pager},
     syncer::Syncer,
 };
 use bytesize::ByteSize;
@@ -21,6 +21,9 @@ use std::{
     },
     thread, time,
 };
+
+const DEFAULT_MAX_PAGES_PER_QUERY: usize = 64;
+const MAX_MAX_PAGES_PER_QUERY: usize = 1024;
 
 /// LiteVfs implements SQLite VFS ops.
 pub struct LiteVfs {
@@ -376,6 +379,9 @@ struct LiteDatabaseHandle {
     database: Arc<RwLock<Database>>,
     lock: ConnLock,
     name: String,
+
+    cur_pages_per_query: usize,
+    max_pages_per_query: usize,
 }
 
 impl LiteDatabaseHandle {
@@ -392,6 +398,9 @@ impl LiteDatabaseHandle {
             database,
             lock,
             name,
+
+            cur_pages_per_query: 0,
+            max_pages_per_query: DEFAULT_MAX_PAGES_PER_QUERY,
         }
     }
 
@@ -481,7 +490,18 @@ impl DatabaseHandle for LiteDatabaseHandle {
     }
 
     fn read_exact_at(&mut self, buf: &mut [u8], offset: u64) -> io::Result<()> {
-        self.database.read().unwrap().read_at(buf, offset)
+        let local_only =
+            self.max_pages_per_query > 0 && self.cur_pages_per_query >= self.max_pages_per_query;
+        if let PageSource::Remote = self
+            .database
+            .read()
+            .unwrap()
+            .read_at(buf, offset, local_only)?
+        {
+            self.cur_pages_per_query += 1;
+        }
+
+        Ok(())
     }
 
     fn write_all_at(&mut self, buf: &[u8], offset: u64) -> io::Result<()> {
@@ -518,6 +538,10 @@ impl DatabaseHandle for LiteDatabaseHandle {
             }
 
             self.release_exclusive();
+        }
+
+        if lock == LockKind::None {
+            self.cur_pages_per_query = 0
         }
 
         self.lock.acquire(lock)
@@ -567,6 +591,21 @@ impl DatabaseHandle for LiteDatabaseHandle {
                     self.pager.set_max_cached_pages(val);
                     Some(Ok(None))
                 }
+                Err(e) => Some(Err(io::Error::new(io::ErrorKind::InvalidInput, e))),
+            },
+
+            ("litevfs_max_pages_per_query", None) => {
+                Some(Ok(Some(self.max_pages_per_query.to_string())))
+            }
+            ("litevfs_max_pages_per_query", Some(val)) => match val.parse::<usize>() {
+                Ok(val) if val <= MAX_MAX_PAGES_PER_QUERY => {
+                    self.max_pages_per_query = val;
+                    Some(Ok(None))
+                }
+                Ok(_) => Some(Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("can't be greater than {}", MAX_MAX_PAGES_PER_QUERY),
+                ))),
                 Err(e) => Some(Err(io::Error::new(io::ErrorKind::InvalidInput, e))),
             },
 
