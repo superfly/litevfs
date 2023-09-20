@@ -51,31 +51,24 @@ jobs:
           - os: "ubuntu-latest"
             target: "x86_64-unknown-linux-gnu"
             soname: "liblitevfs.so"
-            cross: true
           - os: "ubuntu-latest"
             target: "x86_64-unknown-linux-musl"
             soname: "liblitevfs.so"
-            cross: true
           - os: "ubuntu-latest"
             target: "aarch64-unknown-linux-gnu"
             soname: "liblitevfs.so"
-            cross: true
           - os: "ubuntu-latest"
             target: "aarch64-unknown-linux-musl"
             soname: "liblitevfs.so"
-            cross: true
           - os: "macos-latest"
             target: "x86_64-apple-darwin"
             soname: "liblitevfs.dylib"
-            cross: false
           - os: "macos-latest"
             target: "aarch64-apple-darwin"
             soname: "liblitevfs.dylib"
-            cross: false
           - os: "windows-latest"
             target: "x86_64-pc-windows-msvc"
             soname: "litevfs.dll"
-            cross: false
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -86,12 +79,19 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build
-        uses: actions-rs/cargo@v1
+      - name: Install cross
+        if: matrix.os == 'ubuntu-latest'
+        uses: taiki-e/install-action@v2
         with:
-          command: build
-          use-cross: ${{ matrix.cross }}
-          args: --package litevfs --release --target ${{ matrix.target }}
+          tool: cross  
+
+      - name: Build (cross)
+        if: matrix.os == 'ubuntu-latest'
+        run: cross build --package litevfs --release --target ${{ matrix.target }}
+
+      - name: Build
+        if: matrix.os != 'ubuntu-latest'
+        run: cargo build --package litevfs --release --target ${{ matrix.target }}
 
       - name: Package
         run: |
