@@ -10,7 +10,7 @@ mod vfs;
 
 use litetx as ltx;
 use sqlite_vfs::ffi;
-use std::{collections::BTreeSet, fmt};
+use std::fmt;
 
 /// A custom SQLite error code to indicate that LFSC no longer have the
 /// required state and LiteVFS can't recover from this in the middle of
@@ -30,12 +30,16 @@ impl<'a> fmt::Display for PosLogger<'a> {
     }
 }
 
-struct PageNumLogger<'a>(&'a BTreeSet<ltx::PageNum>);
+struct IterLogger<T>(T);
 
-impl<'a> fmt::Display for PageNumLogger<'a> {
+impl<T, I> fmt::Display for IterLogger<T>
+where
+    T: IntoIterator<Item = I> + Copy,
+    I: fmt::Display,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         write!(f, "[")?;
-        for (i, pgno) in self.0.iter().enumerate() {
+        for (i, pgno) in self.0.into_iter().enumerate() {
             if i > 0 {
                 write!(f, ", ")?;
             }

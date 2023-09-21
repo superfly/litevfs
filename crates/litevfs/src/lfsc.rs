@@ -1,4 +1,4 @@
-use crate::{http, PosLogger};
+use crate::{http, IterLogger, PosLogger};
 use litetx as ltx;
 use std::{collections::HashMap, env, fmt, io, sync};
 
@@ -273,17 +273,17 @@ impl Client {
         Ok(())
     }
 
-    pub(crate) fn get_page(
+    pub(crate) fn get_pages(
         &self,
         db: &str,
         pos: ltx::Pos,
-        pgno: ltx::PageNum,
+        pgnos: &[ltx::PageNum],
     ) -> Result<Vec<Page>> {
         log::debug!(
-            "[lfsc] get_page: db = {}, pos = {}, pgno = {}",
+            "[lfsc] get_pages: db = {}, pos = {}, pgnos = {}",
             db,
             pos,
-            pgno
+            IterLogger(pgnos)
         );
 
         #[derive(serde::Deserialize)]
@@ -296,7 +296,7 @@ impl Client {
         u.query_pairs_mut()
             .append_pair("db", db)
             .append_pair("pos", &pos.to_string())
-            .append_pair("pgno", &pgno.to_string());
+            .extend_pairs(pgnos.iter().map(|pgno| ("pgno", pgno.to_string())));
 
         Ok(self.call::<GetPageResponse>("GET", u)?.pages)
     }

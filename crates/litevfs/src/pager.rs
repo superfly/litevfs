@@ -325,7 +325,7 @@ impl Pager {
             return Err(io::ErrorKind::NotFound.into());
         };
 
-        let pages = match self.client.get_page(db, pos, pgno) {
+        let pages = match self.client.get_pages(db, pos, &[pgno]) {
             Ok(pages) => pages,
             Err(lfsc::Error::PosMismatch(x)) => {
                 log::warn!("get_page_remote: db = {}, pgno = {}, pos mismatch error, requested = {}, got = {}",
