@@ -4,7 +4,7 @@ use crate::{
     locks::{ConnLock, VfsLock},
     pager::{PageRef, PageSource, Pager},
     syncer::{Changes, Syncer},
-    PageNumLogger, PosLogger,
+    IterLogger, PosLogger,
 };
 use litetx as ltx;
 use sqlite_vfs::OpenAccess;
@@ -545,7 +545,7 @@ impl Database {
                     self.name,
                     PosLogger(&self.pos),
                     PosLogger(&pos),
-                    PageNumLogger(&pgnos)
+                    IterLogger(&pgnos)
                 );
                 for pgno in &pgnos {
                     if let Err(err) = self.pager.del_page(&self.name, *pgno) {
