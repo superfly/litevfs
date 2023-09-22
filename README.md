@@ -11,7 +11,7 @@ To test with SQLite CLI:
 $ cargo build --release
 ```
 
-1) Provide LITEFS_CLOUD_TOKEN env variable and Load the extension
+1) Provide `LITEFS_CLOUD_TOKEN` env variable and load the extension
 
 ```
 $ LITEFS_CLOUD_TOKEN=<your token> sqlite3
@@ -20,7 +20,7 @@ sqlite> .load target/release/liblitevfs.so
 
 1) Open the database
 ```
-sqlite> .open db1
+sqlite> .open file:db1?vfs=litevfs
 ```
 
 That's it. It should work now. The database is stored under `tmp` in a random directory.
@@ -40,6 +40,25 @@ The following environment variable are handled by LiteVFS:
  - `LITEVFS_LOG_FILE` - log into the given file instead of stderr
 
 The same shared library can be loaded from any language using their SQLite bindings.
+
+### Modifying the database through LiteVFS
+
+In order to modify a database, the LiteVFS instance must host a write lease to the database. A write lease can be obtained
+via a pragma statement:
+
+```
+sqlite> pragma litevfs_acquire_lease;
+sqlite> <updates here>
+sqlite> pragma litevfs_release_lease;
+```
+
+Only one LiteVFS instance can hold a write lease for speficic database at a time.
+
+### Limitations
+
+* Databases with `journal_mode=wal` cannot be modified via LiteVFS (but can be read)
+* Databases with auto-vacuum cannon be opened via LiteVFS at all
+* `VACUUM` is not supported
 
 ## Building LiteVFS for browsers
 
