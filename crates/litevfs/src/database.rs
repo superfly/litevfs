@@ -3,6 +3,7 @@ use crate::{
     lfsc,
     locks::{ConnLock, VfsLock},
     pager::{PageRef, PageSource, Pager},
+    sqlite,
     syncer::{Changes, Syncer},
     IterLogger, PosLogger,
 };
@@ -16,10 +17,6 @@ use std::{
     sync::{Arc, Mutex, RwLock},
     time,
 };
-
-const SQLITE_HEADER_SIZE: u64 = 100;
-const SQLITE_WRITE_VERSION_OFFSET: usize = 18;
-const SQLITE_READ_VERSION_OFFSET: usize = 19;
 
 pub(crate) struct DatabaseManager {
     pager: Arc<Pager>,
@@ -199,8 +196,8 @@ impl Database {
     }
 
     fn ensure_supported(name: &str, page1: &[u8]) -> io::Result<bool> {
-        let write_version = u8::from_be(page1[SQLITE_WRITE_VERSION_OFFSET]);
-        let read_version = u8::from_be(page1[SQLITE_READ_VERSION_OFFSET]);
+        let write_version = u8::from_be(page1[sqlite::WRITE_VERSION_OFFSET]);
+        let read_version = u8::from_be(page1[sqlite::READ_VERSION_OFFSET]);
         let auto_vacuum = u32::from_be_bytes(
             page1[52..56]
                 .try_into()
@@ -316,31 +313,46 @@ impl Database {
         offset: u64,
         local_only: bool,
     ) -> io::Result<PageSource> {
-        let (number, offset) = if offset <= SQLITE_HEADER_SIZE {
+        let (number, offset) = if offset <= sqlite::HEADER_SIZE {
             (ltx::PageNum::ONE, offset)
         } else {
             self.ensure_aligned(buf, offset)?;
             (self.page_num_for(offset)?, 0)
         };
 
-        let prefetch = self.prefetch_pages(number);
+        let prefetch = if buf.len() == self.page_size()?.into_inner() as usize {
+            self.prefetch_pages(number)
+        } else {
+            None
+        };
         let source = self.pager.get_page_slice(
             &self.name, self.pos, number, buf, offset, local_only, prefetch,
         )?;
 
-        if offset as usize <= SQLITE_WRITE_VERSION_OFFSET
-            && offset as usize + buf.len() >= SQLITE_READ_VERSION_OFFSET
+        let mut prefetch = self.prefetch_pages.lock().unwrap();
+        if buf.len() == self.page_size()?.into_inner() as usize {
+            if let Some(candidates) = sqlite::prefetch_candidates(buf, number).map(|t| {
+                t.into_iter()
+                    .filter(|&pgno| !self.pager.has_page(&self.name, pgno).unwrap_or(false))
+                    .collect()
+            }) {
+                *prefetch = candidates;
+            }
+        }
+
+        if offset as usize <= sqlite::WRITE_VERSION_OFFSET
+            && offset as usize + buf.len() >= sqlite::READ_VERSION_OFFSET
             && self.wal
         {
-            buf[SQLITE_WRITE_VERSION_OFFSET - offset as usize] = u8::to_be(1);
-            buf[SQLITE_READ_VERSION_OFFSET - offset as usize] = u8::to_be(1);
+            buf[sqlite::WRITE_VERSION_OFFSET - offset as usize] = u8::to_be(1);
+            buf[sqlite::READ_VERSION_OFFSET - offset as usize] = u8::to_be(1);
         }
 
         Ok(source)
     }
 
     pub(crate) fn write_at(&mut self, buf: &[u8], offset: u64) -> io::Result<()> {
-        if offset == 0 && buf.len() >= (SQLITE_HEADER_SIZE as usize) {
+        if offset == 0 && buf.len() >= (sqlite::HEADER_SIZE as usize) {
             if self.page_size().is_err() {
                 self.page_size = Some(Database::parse_page_size_database(buf)?);
             }
@@ -584,13 +596,12 @@ impl Database {
     }
 
     fn prefetch_pages(&self, pgno: ltx::PageNum) -> Option<Vec<ltx::PageNum>> {
-        let mut prefetch = self.prefetch_pages.lock().unwrap();
+        let prefetch = self.prefetch_pages.lock().unwrap();
         let pgnos = if prefetch.contains(&pgno) {
             Some(prefetch.iter().filter(|&&no| no != pgno).copied().collect())
         } else {
             None
         };
-        prefetch.clear();
 
         pgnos
     }

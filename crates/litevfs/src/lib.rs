@@ -5,6 +5,7 @@ mod leaser;
 mod lfsc;
 mod locks;
 mod pager;
+mod sqlite;
 mod syncer;
 mod vfs;
 
