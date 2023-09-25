@@ -1,4 +1,4 @@
-use crate::{lfsc, PosLogger, LITEVFS_IOERR_POS_MISMATCH};
+use crate::{lfsc, IterLogger, PosLogger, LITEVFS_IOERR_POS_MISMATCH};
 use bytesize::ByteSize;
 use caches::{Cache, SegmentedCache};
 use litetx::{self as ltx, PageChecksum};
@@ -108,6 +108,7 @@ impl Pager {
     }
 
     /// Copies the page starting at `offset` to the provided buffer.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn get_page_slice(
         &self,
         db: &str,
@@ -116,22 +117,32 @@ impl Pager {
         buf: &mut [u8],
         offset: u64,
         local_only: bool,
+        prefetch: Option<Vec<ltx::PageNum>>,
     ) -> io::Result<PageSource> {
         log::debug!(
-            "[pager] get_page_slice: db = {}, pos = {}, pgno = {}, len = {}, offset = {}, local_only = {}",
+            "[pager] get_page_slice: db = {}, pos = {}, pgno = {}, len = {}, offset = {}, local_only = {}, prefetch = {}",
             db,
             PosLogger(&pos),
             pgno,
             buf.len(),
             offset,
             local_only,
+            IterLogger(if let Some(pgnos) = prefetch.as_deref() { pgnos } else { &[] }),
         );
 
         // Request the page either from local cache or from LFSC and convert
         // io::ErrorKind::NotFound errors to io::ErrorKind::UnexpectedEof, as
         // this is what local IO will return in case we read past the file.
         // TODO: we may need to suppress duplicated calls to the same page here.
-        let r = match self.get_page_slice_inner(db, pos, pgno, buf, offset, local_only) {
+        let r = match self.get_page_slice_inner(
+            db,
+            pos,
+            pgno,
+            buf,
+            offset,
+            local_only,
+            prefetch.as_deref(),
+        ) {
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
                 Err(io::ErrorKind::UnexpectedEof.into())
             }
@@ -142,13 +153,14 @@ impl Pager {
         match r {
             Err(err) => {
                 log::warn!(
-                    "[pager] get_page_slice: db = {}, pos = {}, pgno = {}, len = {}, offset = {}, local_only = {}: {:?}",
+                    "[pager] get_page_slice: db = {}, pos = {}, pgno = {}, len = {}, offset = {}, local_only = {}, prefetch = {}: {:?}",
                     db,
                     PosLogger(&pos),
                     pgno,
                     buf.len(),
                     offset,
                     local_only,
+                    IterLogger(if let Some(pgnos) = prefetch.as_deref() { pgnos } else { &[] }),
                     err
                 );
                 Err(err)
@@ -204,7 +216,7 @@ impl Pager {
     }
 
     /// Removes all pages of a database.
-    pub(crate) fn clear(&self, db: &str) -> io::Result<()> {
+    pub(crate) fn clear(&self, db: &str) -> io::Result<Vec<ltx::PageNum>> {
         log::debug!("[pager] clear: db = {}", db);
 
         match self.clear_inner(db) {
@@ -248,9 +260,10 @@ impl Pager {
             _ => (),
         };
 
-        self.get_page_remote(db, pos, pgno)
+        self.get_page_remote(db, pos, pgno, None)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn get_page_slice_inner(
         &self,
         db: &str,
@@ -259,6 +272,7 @@ impl Pager {
         buf: &mut [u8],
         offset: u64,
         local_only: bool,
+        prefetch: Option<&[ltx::PageNum]>,
     ) -> io::Result<PageSource> {
         match self.get_page_slice_local(db, pos, pgno, buf, offset) {
             Ok(_) => return Ok(PageSource::Local),
@@ -273,7 +287,7 @@ impl Pager {
             ));
         }
 
-        let page = self.get_page_remote(db, pos, pgno)?;
+        let page = self.get_page_remote(db, pos, pgno, prefetch)?;
         let offset = offset as usize;
         buf.copy_from_slice(&page.as_ref()[offset..offset + buf.len()]);
 
@@ -318,6 +332,7 @@ impl Pager {
         db: &str,
         pos: Option<ltx::Pos>,
         pgno: ltx::PageNum,
+        prefetch: Option<&[ltx::PageNum]>,
     ) -> io::Result<Page> {
         let pos = if let Some(pos) = pos {
             pos
@@ -325,7 +340,11 @@ impl Pager {
             return Err(io::ErrorKind::NotFound.into());
         };
 
-        let pages = match self.client.get_pages(db, pos, &[pgno]) {
+        let mut pages = vec![pgno];
+        if let Some(pgnos) = prefetch {
+            pages.extend(pgnos);
+        }
+        let pages = match self.client.get_pages(db, pos, &pages) {
             Ok(pages) => pages,
             Err(lfsc::Error::PosMismatch(x)) => {
                 log::warn!("get_page_remote: db = {}, pgno = {}, pos mismatch error, requested = {}, got = {}",
@@ -411,7 +430,9 @@ impl Pager {
         Ok(())
     }
 
-    fn clear_inner(&self, db: &str) -> io::Result<()> {
+    fn clear_inner(&self, db: &str) -> io::Result<Vec<ltx::PageNum>> {
+        let mut pgnos = Vec::new();
+
         for entry in fs::read_dir(&self.pages_path(db))? {
             let entry = entry?;
             if !entry.file_type()?.is_file() {
@@ -422,9 +443,11 @@ impl Pager {
 
             let rpgno = ltx::PageNum::try_from(Path::new(&entry.file_name()))?;
             self.lru.lock().unwrap().remove(&self.cache_key(db, rpgno));
+
+            pgnos.push(rpgno);
         }
 
-        Ok(())
+        Ok(pgnos)
     }
 
     fn pages_path(&self, db: &str) -> PathBuf {
