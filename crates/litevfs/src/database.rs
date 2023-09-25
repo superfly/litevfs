@@ -558,15 +558,21 @@ impl Database {
                     PosLogger(&pos),
                     IterLogger(&pgnos)
                 );
+
+                let mut prefetch = self.prefetch_pages.lock().unwrap();
+                prefetch.clear();
                 for pgno in &pgnos {
-                    if let Err(err) = self.pager.del_page(&self.name, *pgno) {
-                        self.syncer.put_changes(&self.name, Changes::Pages(pgnos));
-                        return Err(err);
+                    match self.pager.del_page(&self.name, *pgno) {
+                        Err(err) => {
+                            self.syncer.put_changes(&self.name, Changes::Pages(pgnos));
+                            return Err(err);
+                        }
+                        Ok(true) if prefetch.len() < self.prefetch_limit => {
+                            prefetch.insert(*pgno);
+                        }
+                        _ => (),
                     }
                 }
-
-                *self.prefetch_pages.lock().unwrap() =
-                    pgnos.into_iter().take(self.prefetch_limit).collect();
 
                 pos
             }
