@@ -18,6 +18,9 @@ use std::{
     time,
 };
 
+const DEFAULT_MAX_PREFETCH_PAGES: usize = 32;
+pub(crate) const MAX_MAX_PREFETCH_PAGES: usize = 128;
+
 pub(crate) struct DatabaseManager {
     pager: Arc<Pager>,
     databases: HashMap<String, Arc<RwLock<Database>>>,
@@ -189,7 +192,7 @@ impl Database {
             pos,
             dirty_pages: BTreeMap::new(),
             prefetch_pages: Mutex::new(BTreeSet::new()),
-            prefetch_limit: 32,
+            prefetch_limit: DEFAULT_MAX_PREFETCH_PAGES,
             sync_period: time::Duration::from_secs(1),
             wal,
         })
