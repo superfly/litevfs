@@ -327,7 +327,7 @@ impl Client {
 
     #[allow(dead_code)]
     pub(crate) fn acquire_lease(&self, db: &str, op: LeaseOp) -> Result<Lease> {
-        log::debug!("[lfscs] acquire_lease: db = {}, op = {}", db, op);
+        log::debug!("[lfsc] acquire_lease: db = {}, op = {}", db, op);
 
         let mut u = self.host.clone();
         u.set_path("/lease");
@@ -348,7 +348,7 @@ impl Client {
 
     #[allow(dead_code)]
     pub(crate) fn release_lease(&self, db: &str, lease: Lease) -> Result<()> {
-        log::debug!("[lfscs] release_lease: db = {}, lease = {}", db, lease.id);
+        log::debug!("[lfsc] release_lease: db = {}, lease = {}", db, lease.id);
 
         let mut u = self.host.clone();
         u.set_path("/lease");
@@ -369,7 +369,7 @@ impl Client {
         &self,
         positions: &HashMap<String, Option<ltx::Pos>>,
     ) -> Result<HashMap<String, Changes>> {
-        log::debug!("[lfscs] sync: positions = {:?}", positions);
+        log::debug!("[lfsc] sync: positions = {:?}", positions);
 
         let mut u = self.host.clone();
         u.set_path("/sync");

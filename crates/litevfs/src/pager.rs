@@ -228,6 +228,19 @@ impl Pager {
         }
     }
 
+    /// Checks if the page is cached locally
+    pub(crate) fn has_page(&self, db: &str, pgno: ltx::PageNum) -> io::Result<bool> {
+        log::debug!("[pager] has_page: db = {}, pgno = {}", db, pgno);
+
+        match self.has_page_inner(db, pgno) {
+            Err(err) => {
+                log::warn!("[pager] has_page: db = {} pgno = {}: {:?}", db, pgno, err);
+                Err(err)
+            }
+            x => x,
+        }
+    }
+
     /// Returns the minimum available space that pager is trying to keep on the FS.
     pub(crate) fn min_available_space(&self) -> u64 {
         self.min_available_space.load(Ordering::Acquire)
@@ -448,6 +461,12 @@ impl Pager {
         }
 
         Ok(pgnos)
+    }
+
+    fn has_page_inner(&self, db: &str, pgno: ltx::PageNum) -> io::Result<bool> {
+        let page_name = self.pages_path(db).join(PathBuf::from(pgno));
+
+        page_name.try_exists()
     }
 
     fn pages_path(&self, db: &str) -> PathBuf {
