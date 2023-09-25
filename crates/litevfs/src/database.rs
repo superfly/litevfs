@@ -9,11 +9,11 @@ use crate::{
 use litetx as ltx;
 use sqlite_vfs::OpenAccess;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs,
     io::{self, Read, Seek, SeekFrom},
     path::PathBuf,
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
     time,
 };
 
@@ -146,6 +146,8 @@ pub(crate) struct Database {
     current_db_size: Option<ltx::PageNum>,
     pub(crate) pos: Option<ltx::Pos>,
     dirty_pages: BTreeMap<ltx::PageNum, Option<ltx::Checksum>>,
+    prefetch_pages: Mutex<BTreeSet<ltx::PageNum>>,
+    pub(crate) prefetch_limit: usize,
     pub(crate) sync_period: time::Duration,
     wal: bool,
 }
@@ -189,6 +191,8 @@ impl Database {
             current_db_size: commit,
             pos,
             dirty_pages: BTreeMap::new(),
+            prefetch_pages: Mutex::new(BTreeSet::new()),
+            prefetch_limit: 32,
             sync_period: time::Duration::from_secs(1),
             wal,
         })
@@ -319,9 +323,10 @@ impl Database {
             (self.page_num_for(offset)?, 0)
         };
 
-        let source = self
-            .pager
-            .get_page_slice(&self.name, self.pos, number, buf, offset, local_only)?;
+        let prefetch = self.prefetch_pages(number);
+        let source = self.pager.get_page_slice(
+            &self.name, self.pos, number, buf, offset, local_only, prefetch,
+        )?;
 
         if offset as usize <= SQLITE_WRITE_VERSION_OFFSET
             && offset as usize + buf.len() >= SQLITE_READ_VERSION_OFFSET
@@ -530,9 +535,15 @@ impl Database {
                     PosLogger(&self.pos),
                     PosLogger(&pos)
                 );
-                if let Err(err) = self.pager.clear(&self.name) {
-                    self.syncer.put_changes(&self.name, Changes::All);
-                    return Err(err);
+                match self.pager.clear(&self.name) {
+                    Err(err) => {
+                        self.syncer.put_changes(&self.name, Changes::All);
+                        return Err(err);
+                    }
+                    Ok(pgnos) => {
+                        *self.prefetch_pages.lock().unwrap() =
+                            pgnos.into_iter().take(self.prefetch_limit).collect();
+                    }
                 };
 
                 pos
@@ -553,6 +564,10 @@ impl Database {
                         return Err(err);
                     }
                 }
+
+                *self.prefetch_pages.lock().unwrap() =
+                    pgnos.into_iter().take(self.prefetch_limit).collect();
+
                 pos
             }
         };
@@ -560,6 +575,18 @@ impl Database {
         self.pos = pos;
 
         Ok(())
+    }
+
+    fn prefetch_pages(&self, pgno: ltx::PageNum) -> Option<Vec<ltx::PageNum>> {
+        let mut prefetch = self.prefetch_pages.lock().unwrap();
+        let pgnos = if prefetch.contains(&pgno) {
+            Some(prefetch.iter().filter(|&&no| no != pgno).copied().collect())
+        } else {
+            None
+        };
+        prefetch.clear();
+
+        pgnos
     }
 
     pub(crate) fn acquire_lease(&self) -> io::Result<()> {
