@@ -296,7 +296,14 @@ impl Client {
         u.query_pairs_mut()
             .append_pair("db", db)
             .append_pair("pos", &pos.to_string())
-            .extend_pairs(pgnos.iter().map(|pgno| ("pgno", pgno.to_string())));
+            .append_pair(
+                "pgno",
+                &pgnos
+                    .iter()
+                    .map(|pgno| pgno.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
 
         Ok(self.call::<GetPageResponse>("GET", u)?.pages)
     }
