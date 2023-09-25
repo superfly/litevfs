@@ -22,8 +22,8 @@ use std::{
     thread, time,
 };
 
-const DEFAULT_MAX_PAGES_PER_QUERY: usize = 64;
-const MAX_MAX_PAGES_PER_QUERY: usize = 1024;
+const DEFAULT_MAX_REQS_PER_QUERY: usize = 64;
+const MAX_MAX_REQS_PER_QUERY: usize = 1024;
 
 /// LiteVfs implements SQLite VFS ops.
 pub struct LiteVfs {
@@ -400,7 +400,7 @@ impl LiteDatabaseHandle {
             name,
 
             cur_pages_per_query: 0,
-            max_pages_per_query: DEFAULT_MAX_PAGES_PER_QUERY,
+            max_pages_per_query: DEFAULT_MAX_REQS_PER_QUERY,
         }
     }
 
@@ -594,17 +594,17 @@ impl DatabaseHandle for LiteDatabaseHandle {
                 Err(e) => Some(Err(io::Error::new(io::ErrorKind::InvalidInput, e))),
             },
 
-            ("litevfs_max_pages_per_query", None) => {
+            ("litevfs_max_reqs_per_query", None) => {
                 Some(Ok(Some(self.max_pages_per_query.to_string())))
             }
-            ("litevfs_max_pages_per_query", Some(val)) => match val.parse::<usize>() {
-                Ok(val) if val <= MAX_MAX_PAGES_PER_QUERY => {
+            ("litevfs_max_reqs_per_query", Some(val)) => match val.parse::<usize>() {
+                Ok(val) if val <= MAX_MAX_REQS_PER_QUERY => {
                     self.max_pages_per_query = val;
                     Some(Ok(None))
                 }
                 Ok(_) => Some(Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("can't be greater than {}", MAX_MAX_PAGES_PER_QUERY),
+                    format!("can't be greater than {}", MAX_MAX_REQS_PER_QUERY),
                 ))),
                 Err(e) => Some(Err(io::Error::new(io::ErrorKind::InvalidInput, e))),
             },
