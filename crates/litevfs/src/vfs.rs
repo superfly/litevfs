@@ -1,5 +1,5 @@
 use crate::{
-    database::{Database, DatabaseManager},
+    database::{Database, DatabaseManager, MAX_MAX_PREFETCH_PAGES},
     leaser::Leaser,
     lfsc,
     locks::{ConnLock, VfsLock},
@@ -617,6 +617,21 @@ impl DatabaseHandle for LiteDatabaseHandle {
                     self.database.write().unwrap().sync_period = val;
                     Some(Ok(None))
                 }
+                Err(e) => Some(Err(io::Error::new(io::ErrorKind::InvalidInput, e))),
+            },
+
+            ("litevfs_max_prefetch_pages", None) => Some(Ok(Some(
+                self.database.read().unwrap().prefetch_limit.to_string(),
+            ))),
+            ("litevfs_max_prefetch_pages", Some(val)) => match val.parse::<usize>() {
+                Ok(val) if val <= MAX_MAX_PREFETCH_PAGES => {
+                    self.database.write().unwrap().prefetch_limit = val;
+                    Some(Ok(None))
+                }
+                Ok(_) => Some(Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("can't be greater than {}", MAX_MAX_PREFETCH_PAGES),
+                ))),
                 Err(e) => Some(Err(io::Error::new(io::ErrorKind::InvalidInput, e))),
             },
 
