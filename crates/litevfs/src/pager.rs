@@ -190,7 +190,7 @@ impl Pager {
 
     /// Deletes the page from the local cache. It's fine to attempt to delete an non-existing
     /// page.
-    pub(crate) fn del_page(&self, db: &str, pgno: ltx::PageNum) -> io::Result<()> {
+    pub(crate) fn del_page(&self, db: &str, pgno: ltx::PageNum) -> io::Result<bool> {
         log::debug!("[pager] del_page: db = {} , pgno = {}", db, pgno);
 
         match self.del_page_inner(db, pgno) {
@@ -403,13 +403,13 @@ impl Pager {
         Ok(())
     }
 
-    fn del_page_inner(&self, db: &str, pgno: ltx::PageNum) -> io::Result<()> {
+    fn del_page_inner(&self, db: &str, pgno: ltx::PageNum) -> io::Result<bool> {
         let name = self.pages_path(db).join(PathBuf::from(pgno));
-        remove_file(name)?;
+        let removed = remove_file(name)?;
 
         self.lru.lock().unwrap().remove(&self.cache_key(db, pgno));
 
-        Ok(())
+        Ok(removed)
     }
 
     fn truncate_inner(&self, db: &str, pgno: ltx::PageNum) -> io::Result<()> {
@@ -575,10 +575,11 @@ struct PageCacheKey {
     pgno: ltx::PageNum,
 }
 
-fn remove_file<P: AsRef<Path>>(file: P) -> io::Result<()> {
+fn remove_file<P: AsRef<Path>>(file: P) -> io::Result<bool> {
     match fs::remove_file(file) {
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-        x => x,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(x) => Err(x),
+        Ok(()) => Ok(true),
     }
 }
 
