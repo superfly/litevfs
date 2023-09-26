@@ -94,7 +94,7 @@ impl Pager {
         // Log the error, if any
         match r {
             Err(err) => {
-                log::warn!(
+                log::error!(
                     "[pager] get_page: db = {}, pos = {}, pgno = {}: {:?}",
                     db,
                     PosLogger(&pos),
@@ -152,7 +152,7 @@ impl Pager {
         // Log the error, if any
         match r {
             Err(err) => {
-                log::warn!(
+                log::error!(
                     "[pager] get_page_slice: db = {}, pos = {}, pgno = {}, len = {}, offset = {}, local_only = {}, prefetch = {}: {:?}",
                     db,
                     PosLogger(&pos),
@@ -176,7 +176,7 @@ impl Pager {
 
         match self.put_page_inner(db, page) {
             Err(err) => {
-                log::warn!(
+                log::error!(
                     "[pager] put_page: db = {}, pgno = {}: {:?}",
                     db,
                     page.number(),
@@ -195,7 +195,7 @@ impl Pager {
 
         match self.del_page_inner(db, pgno) {
             Err(err) => {
-                log::warn!("[pager] del_page: db = {}, pgno = {}: {:?}", db, pgno, err);
+                log::error!("[pager] del_page: db = {}, pgno = {}: {:?}", db, pgno, err);
                 Err(err)
             }
             x => x,
@@ -208,7 +208,7 @@ impl Pager {
 
         match self.truncate_inner(db, pgno) {
             Err(err) => {
-                log::warn!("[pager] truncate: db = {}, pgno = {}: {:?}", db, pgno, err);
+                log::error!("[pager] truncate: db = {}, pgno = {}: {:?}", db, pgno, err);
                 Err(err)
             }
             x => x,
@@ -221,7 +221,7 @@ impl Pager {
 
         match self.clear_inner(db) {
             Err(err) => {
-                log::warn!("[pager] clear: db = {}: {:?}", db, err);
+                log::error!("[pager] clear: db = {}: {:?}", db, err);
                 Err(err)
             }
             x => x,
@@ -234,7 +234,7 @@ impl Pager {
 
         match self.has_page_inner(db, pgno) {
             Err(err) => {
-                log::warn!("[pager] has_page: db = {} pgno = {}: {:?}", db, pgno, err);
+                log::error!("[pager] has_page: db = {} pgno = {}: {:?}", db, pgno, err);
                 Err(err)
             }
             x => x,

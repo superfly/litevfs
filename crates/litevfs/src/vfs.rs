@@ -44,7 +44,7 @@ impl Vfs for LiteVfs {
             opts.kind,
             OpenKind::MainDb | OpenKind::TempDb | OpenKind::MainJournal | OpenKind::TempJournal
         ) {
-            log::warn!(
+            log::error!(
                 "[vfs] open: db = {}, opts = {:?}: unsupported open kind",
                 db,
                 opts
@@ -99,7 +99,7 @@ impl Vfs for LiteVfs {
         };
 
         if let Err(ref err) = res {
-            log::warn!("[vfs] open: db = {}, opts = {:?}: {:?}", db, opts, err,);
+            log::error!("[vfs] open: db = {}, opts = {:?}: {:?}", db, opts, err,);
         }
 
         res
@@ -141,7 +141,7 @@ impl Vfs for LiteVfs {
                     .database_manager
                     .lock()
                     .unwrap()
-                    .get_database(dbname.as_ref(), OpenAccess::Write)?;
+                    .get_database(dbname.as_ref(), OpenAccess::Read)?;
                 let database = database.read().unwrap();
 
                 Ok(database.journal_path.exists())
@@ -252,7 +252,7 @@ impl sqlite_vfs::DatabaseHandle for LiteHandle {
     fn size(&self) -> io::Result<u64> {
         match self.inner.size() {
             Err(err) => {
-                log::warn!(
+                log::error!(
                     "[handle] size: type = {}, name = {}: {:?}",
                     self.inner.handle_type(),
                     self.inner.handle_name(),
@@ -268,7 +268,16 @@ impl sqlite_vfs::DatabaseHandle for LiteHandle {
     fn read_exact_at(&mut self, buf: &mut [u8], offset: u64) -> io::Result<()> {
         match self.inner.read_exact_at(buf, offset) {
             Err(err) => {
-                log::warn!(
+                // SQLite reads past journal file during normal operation.
+                // Silence this error.
+                if err.kind() == io::ErrorKind::UnexpectedEof
+                    && self.inner.handle_type() == "journal"
+                    && offset >= self.size()?
+                {
+                    return Err(err);
+                }
+
+                log::error!(
                     "[handle] read_exact_at: type = {}, name = {}, len = {}, offset = {}: {:?}",
                     self.inner.handle_type(),
                     self.inner.handle_name(),
@@ -286,7 +295,7 @@ impl sqlite_vfs::DatabaseHandle for LiteHandle {
     fn write_all_at(&mut self, buf: &[u8], offset: u64) -> io::Result<()> {
         match self.inner.write_all_at(buf, offset) {
             Err(err) => {
-                log::warn!(
+                log::error!(
                     "[handle] write_all_at: type = {}, name = {}, len = {}, offset = {}: {:?}",
                     self.inner.handle_type(),
                     self.inner.handle_name(),
@@ -304,7 +313,7 @@ impl sqlite_vfs::DatabaseHandle for LiteHandle {
     fn sync(&mut self, data_only: bool) -> io::Result<()> {
         match self.inner.sync(data_only) {
             Err(err) => {
-                log::warn!(
+                log::error!(
                     "[handle] sync: type = {}, name = {}, data_only = {}: {:?}",
                     self.inner.handle_type(),
                     self.inner.handle_name(),
@@ -321,7 +330,7 @@ impl sqlite_vfs::DatabaseHandle for LiteHandle {
     fn set_len(&mut self, size: u64) -> io::Result<()> {
         match self.inner.set_len(size) {
             Err(err) => {
-                log::warn!(
+                log::error!(
                     "[handle] set_len: type = {}, name = {}, size = {}: {:?}",
                     self.inner.handle_type(),
                     self.inner.handle_name(),
@@ -355,7 +364,7 @@ impl sqlite_vfs::DatabaseHandle for LiteHandle {
         match self.inner.pragma(pragma, val) {
             Some(Err(err)) => {
                 let val = if let Some(val) = val { val } else { "<none>" };
-                log::warn!(
+                log::error!(
                     "[handle] pragma: pragma = {}, value = {}: {:?}",
                     pragma,
                     val,
