@@ -323,7 +323,7 @@ impl Database {
             (self.page_num_for(offset)?, 0)
         };
 
-        let prefetch = if buf.len() == self.page_size()?.into_inner() as usize {
+        let prefetch = if self.can_prefetch(buf) {
             self.prefetch_pages(number)
         } else {
             None
@@ -333,7 +333,7 @@ impl Database {
         )?;
 
         let mut prefetch = self.prefetch_pages.lock().unwrap();
-        if buf.len() == self.page_size()?.into_inner() as usize {
+        if self.can_prefetch(buf) {
             if let Some(candidates) = sqlite::prefetch_candidates(buf, number).map(|t| {
                 t.into_iter()
                     .filter(|&pgno| !self.pager.has_page(&self.name, pgno).unwrap_or(false))
@@ -352,6 +352,16 @@ impl Database {
         }
 
         Ok(source)
+    }
+
+    fn can_prefetch(&self, buf: &[u8]) -> bool {
+        let page_size = if let Ok(ps) = self.page_size() {
+            ps.into_inner() as usize
+        } else {
+            return false;
+        };
+
+        buf.len() == page_size
     }
 
     pub(crate) fn write_at(&mut self, buf: &[u8], offset: u64) -> io::Result<()> {
