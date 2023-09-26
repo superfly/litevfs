@@ -323,13 +323,14 @@ impl Database {
             (self.page_num_for(offset)?, 0)
         };
 
-        let prefetch = if self.can_prefetch(buf) {
-            self.prefetch_pages(number)
-        } else {
-            None
-        };
         let source = self.pager.get_page_slice(
-            &self.name, self.pos, number, buf, offset, local_only, prefetch,
+            &self.name,
+            self.pos,
+            number,
+            buf,
+            offset,
+            local_only,
+            self.prefetch_pages(number),
         )?;
 
         let mut prefetch = self.prefetch_pages.lock().unwrap();
