@@ -50,11 +50,10 @@ impl DatabaseManager {
         dbname: &str,
         access: OpenAccess,
     ) -> io::Result<Arc<RwLock<Database>>> {
-        if let Some(db) = self.get_database_local(dbname, access)? {
-            return Ok(db);
-        }
-
-        let db = if let Some(db) = self.get_database_remote(dbname, access)? {
+        let db = if let Some(db) = self.get_database_local(dbname, access)? {
+            db
+        } else if let Some(db) = self.get_database_remote(dbname, access)? {
+            self.databases.insert(dbname.into(), Arc::clone(&db));
             db
         } else {
             return Err(io::Error::new(
@@ -63,7 +62,20 @@ impl DatabaseManager {
             ));
         };
 
-        self.databases.insert(dbname.into(), Arc::clone(&db));
+        if access != OpenAccess::Read {
+            if db.read().unwrap().wal {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "DB in WAL mode can't be opened for RW",
+                ));
+            }
+            if db.read().unwrap().auto_vacuum {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "DB with auto_vacuum can't be opened for RW",
+                ));
+            }
+        }
 
         Ok(db)
     }
@@ -150,6 +162,7 @@ pub(crate) struct Database {
     pub(crate) prefetch_limit: usize,
     pub(crate) sync_period: time::Duration,
     wal: bool,
+    auto_vacuum: bool,
 }
 
 impl Database {
@@ -167,15 +180,26 @@ impl Database {
         pager.prepare_db(name)?;
         fs::create_dir_all(&ltx_path)?;
 
-        let (wal, page_size, commit) = match pager.get_page(name, pos, ltx::PageNum::ONE) {
-            Ok(page) => (
-                Database::ensure_supported(name, page.as_ref())?,
-                Some(Database::parse_page_size_database(page.as_ref())?),
-                Some(Database::parse_commit_database(page.as_ref())?),
-            ),
-            Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => (false, None, None),
-            Err(err) => return Err(err),
-        };
+        let (wal, auto_vacuum, page_size, commit) =
+            match pager.get_page(name, pos, ltx::PageNum::ONE) {
+                Ok(page) => (
+                    Database::parse_wal(page.as_ref()),
+                    Database::parse_autovacuum(page.as_ref())?,
+                    Some(Database::parse_page_size_database(page.as_ref())?),
+                    Some(Database::parse_commit_database(page.as_ref())?),
+                ),
+                Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => {
+                    (false, false, None, None)
+                }
+                Err(err) => return Err(err),
+            };
+
+        if wal {
+            log::warn!("[database] db = {}, database in WAL mode", name);
+        }
+        if auto_vacuum {
+            log::warn!("[database] db = {}, database with auto vacuum", name);
+        }
 
         Ok(Database {
             lock: VfsLock::new(),
@@ -195,40 +219,25 @@ impl Database {
             prefetch_limit: DEFAULT_MAX_PREFETCH_PAGES,
             sync_period: time::Duration::from_secs(1),
             wal,
+            auto_vacuum,
         })
     }
 
-    fn ensure_supported(name: &str, page1: &[u8]) -> io::Result<bool> {
+    fn parse_wal(page1: &[u8]) -> bool {
         let write_version = u8::from_be(page1[sqlite::WRITE_VERSION_OFFSET]);
         let read_version = u8::from_be(page1[sqlite::READ_VERSION_OFFSET]);
+
+        write_version == 2 || read_version == 2
+    }
+
+    fn parse_autovacuum(page1: &[u8]) -> io::Result<bool> {
         let auto_vacuum = u32::from_be_bytes(
             page1[52..56]
                 .try_into()
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
         );
 
-        let wal = if write_version == 2 || read_version == 2 {
-            log::warn!(
-                "[database] ensure_supported: db = {}, database in WAL mode",
-                name
-            );
-            true
-            // return Err(io::Error::new(
-            //     io::ErrorKind::InvalidData,
-            //     "WAL is not supported by LiteVFS",
-            // ));
-        } else {
-            false
-        };
-
-        if auto_vacuum > 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "autovacuum is not supported by LiteVFS",
-            ));
-        }
-
-        Ok(wal)
+        Ok(auto_vacuum > 0)
     }
 
     fn parse_page_size_database(page1: &[u8]) -> io::Result<ltx::PageSize> {
