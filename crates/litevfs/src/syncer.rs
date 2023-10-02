@@ -54,13 +54,28 @@ mod native {
         conns: u32,
 
         last_sync: time::SystemTime,
+        period: time::Duration,
     }
 
     impl Db {
-        fn time_since_last_sync(&self) -> time::Duration {
-            time::SystemTime::now()
-                .duration_since(self.last_sync)
-                .unwrap_or_default()
+        fn sync_period(&self) -> Option<time::Duration> {
+            if self.period.is_zero() {
+                return None;
+            }
+
+            Some(self.period)
+        }
+
+        fn next_sync(&self) -> Option<time::SystemTime> {
+            self.last_sync.checked_add(self.sync_period()?)
+        }
+
+        fn needs_sync(&self, now: &time::SystemTime) -> bool {
+            if let Some(ref ns) = self.next_sync() {
+                return ns <= now;
+            }
+
+            false
         }
     }
 
@@ -102,6 +117,7 @@ mod native {
                     changes: None,
                     conns: 1,
                     last_sync: time::SystemTime::now(),
+                    period: self.period,
                 });
 
             self.notify();
@@ -134,11 +150,8 @@ mod native {
             if db.position.is_some() && db.position != pos {
                 return true;
             }
-            if db.time_since_last_sync() > self.period {
-                return true;
-            }
 
-            false
+            db.needs_sync(&time::SystemTime::now())
         }
 
         pub(crate) fn get_changes(
@@ -149,7 +162,7 @@ mod native {
             let sym = self.sym(db);
 
             let mut dbs = self.dbs.lock().unwrap();
-            while dbs.get(&sym).unwrap().time_since_last_sync() > self.period {
+            while dbs.get(&sym).unwrap().needs_sync(&time::SystemTime::now()) {
                 self.notify();
                 dbs = self.cvar.wait(dbs).unwrap();
             }
@@ -185,15 +198,33 @@ mod native {
             db.changes.take();
         }
 
-        pub(crate) fn sync(&self) -> io::Result<()> {
+        pub(crate) fn sync_period(&self, db: &str) -> time::Duration {
+            let sym = self.sym(db);
+
+            self.dbs.lock().unwrap().get(&sym).unwrap().period
+        }
+
+        pub(crate) fn set_sync_period(&self, db: &str, period: time::Duration) {
+            let sym = self.sym(db);
+
+            self.dbs.lock().unwrap().get_mut(&sym).unwrap().period = period;
+
+            self.notify();
+        }
+
+        pub(crate) fn sync(&self, db_syms: &[DefaultSymbol]) -> io::Result<()> {
             let old_positions = {
                 let interner = self.interner.lock().unwrap();
+                let dbs = self.dbs.lock().unwrap();
 
-                self.dbs
-                    .lock()
-                    .unwrap()
+                db_syms
                     .iter()
-                    .map(|(&k, db)| (interner.resolve(k).unwrap().to_owned(), db.position))
+                    .filter_map(|&k| {
+                        Some((
+                            interner.resolve(k).unwrap().to_owned(),
+                            dbs.get(&k)?.position,
+                        ))
+                    })
                     .collect()
             };
 
@@ -202,6 +233,7 @@ mod native {
 
             let interner = self.interner.lock().unwrap();
             let mut dbs = self.dbs.lock().unwrap();
+            let now = time::SystemTime::now();
             for (&k, db) in dbs.iter_mut() {
                 let name = interner.resolve(k).unwrap();
                 let (new_pos, changes) = if let Some(changes) = changes.remove(name) {
@@ -219,12 +251,18 @@ mod native {
                     db.changes.take(),
                 );
                 db.position = new_pos;
-                db.last_sync = time::SystemTime::now();
+                db.last_sync = now;
             }
 
             self.cvar.notify_all();
 
             Ok(())
+        }
+
+        pub(crate) fn sync_one(&self, db: &str) -> io::Result<()> {
+            let sym = self.sym(db);
+
+            self.sync(&[sym])
         }
 
         fn notify(&self) {
@@ -235,13 +273,34 @@ mod native {
             use crossbeam_channel::{after, never, select};
 
             loop {
-                let has_dbs = !self.dbs.lock().unwrap().is_empty();
-                let waiter = if has_dbs {
-                    if let Err(err) = self.sync() {
-                        log::warn!("[syncer] run: sync failed: {:?}", err);
-                    }
+                let (min_sync_period, last_sync) = {
+                    let dbs = self.dbs.lock().unwrap();
 
-                    after(self.period)
+                    (
+                        dbs.values().filter_map(|db| db.sync_period()).min(),
+                        dbs.values().map(|db| db.last_sync).max(),
+                    )
+                };
+
+                let since_last_sync = if let Some(last_sync) = last_sync {
+                    time::SystemTime::now()
+                        .duration_since(last_sync)
+                        .unwrap_or_default()
+                } else {
+                    time::Duration::ZERO
+                };
+                let next_sync =
+                    min_sync_period.map(|p| p.checked_sub(since_last_sync).unwrap_or_default());
+                log::error!(
+                    "{:?} {:?} {:?}",
+                    min_sync_period,
+                    since_last_sync,
+                    next_sync
+                );
+
+                let waiter = if let Some(next_sync) = next_sync {
+                    log::debug!("[syncer]: next sync in {}ms", next_sync.as_millis());
+                    after(next_sync)
                 } else {
                     never()
                 };
@@ -250,6 +309,20 @@ mod native {
                 recv(rx) -> _ => (),
                 recv(waiter) -> _ => (),
                 };
+
+                let now = time::SystemTime::now();
+                let dbs = self
+                    .dbs
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|(&k, db)| if db.needs_sync(&now) { Some(k) } else { None })
+                    .collect::<Vec<_>>();
+                if !dbs.is_empty() {
+                    if let Err(err) = self.sync(&dbs) {
+                        log::warn!("[syncer] run: sync failed: {:?}", err);
+                    }
+                }
             }
         }
     }

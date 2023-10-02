@@ -614,11 +614,11 @@ impl DatabaseHandle for LiteDatabaseHandle {
             },
 
             ("litevfs_cache_sync_period", None) => Some(Ok(Some(
-                format_duration(self.database.read().unwrap().sync_period).to_string(),
+                format_duration(self.syncer.sync_period(&self.name)).to_string(),
             ))),
             ("litevfs_cache_sync_period", Some(val)) => match parse_duration(val) {
                 Ok(val) => {
-                    self.database.write().unwrap().sync_period = val;
+                    self.syncer.set_sync_period(&self.name, val);
                     Some(Ok(None))
                 }
                 Err(e) => Some(Err(io::Error::new(io::ErrorKind::InvalidInput, e))),
