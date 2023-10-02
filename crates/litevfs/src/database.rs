@@ -160,7 +160,6 @@ pub(crate) struct Database {
     dirty_pages: BTreeMap<ltx::PageNum, Option<ltx::Checksum>>,
     prefetch_pages: Mutex<BTreeSet<ltx::PageNum>>,
     pub(crate) prefetch_limit: usize,
-    pub(crate) sync_period: time::Duration,
     wal: bool,
     auto_vacuum: bool,
 }
@@ -217,7 +216,6 @@ impl Database {
             dirty_pages: BTreeMap::new(),
             prefetch_pages: Mutex::new(BTreeSet::new()),
             prefetch_limit: DEFAULT_MAX_PREFETCH_PAGES,
-            sync_period: time::Duration::from_secs(1),
             wal,
             auto_vacuum,
         })
@@ -547,7 +545,7 @@ impl Database {
 
     pub(crate) fn sync(&mut self, force: bool) -> io::Result<()> {
         if force {
-            self.syncer.sync()?;
+            self.syncer.sync_one(&self.name)?;
         }
 
         let pos = match self.syncer.get_changes(&self.name, self.pos)? {
