@@ -43,36 +43,24 @@ mod native {
         notifier: crossbeam_channel::Sender<()>,
         period: time::Duration,
 
-        inner: Mutex<Inner>,
+        interner: Mutex<StringInterner>,
+        dbs: Mutex<HashMap<DefaultSymbol, Db>>,
         cvar: Condvar,
     }
 
-    struct Inner {
-        interner: StringInterner,
+    struct Db {
+        position: Option<ltx::Pos>,
+        changes: Option<super::Changes>,
+        conns: u32,
 
-        // latest known position
-        positions: HashMap<DefaultSymbol, Option<ltx::Pos>>,
-        // changes accumulated since the last DB sync
-        changes: HashMap<DefaultSymbol, super::Changes>,
-        // numer of open connections per DB
-        conns: HashMap<DefaultSymbol, u32>,
-        // last time when a sync was performed for DB
-        sync_times: HashMap<DefaultSymbol, time::SystemTime>,
+        last_sync: time::SystemTime,
     }
 
-    impl Inner {
-        fn time_since_last_sync(&self, db: DefaultSymbol) -> Option<time::Duration> {
-            let last_sync = if let Some(last_sync) = self.sync_times.get(&db) {
-                *last_sync
-            } else {
-                return None;
-            };
-
-            if let Ok(dur) = time::SystemTime::now().duration_since(last_sync) {
-                Some(dur)
-            } else {
-                None
-            }
+    impl Db {
+        fn time_since_last_sync(&self) -> time::Duration {
+            time::SystemTime::now()
+                .duration_since(self.last_sync)
+                .unwrap_or_default()
         }
     }
 
@@ -83,13 +71,8 @@ mod native {
                 client,
                 notifier: tx,
                 period,
-                inner: Mutex::new(Inner {
-                    interner: StringInterner::new(),
-                    positions: HashMap::new(),
-                    changes: HashMap::new(),
-                    conns: HashMap::new(),
-                    sync_times: HashMap::new(),
-                }),
+                interner: Mutex::new(StringInterner::new()),
+                dbs: Mutex::new(HashMap::new()),
                 cvar: Condvar::new(),
             });
 
@@ -102,54 +85,60 @@ mod native {
             syncer
         }
 
-        pub(crate) fn open_conn(&self, db: &str, pos: Option<ltx::Pos>) {
-            let mut inner = self.inner.lock().unwrap();
+        fn sym(&self, db: &str) -> DefaultSymbol {
+            self.interner.lock().unwrap().get_or_intern(db)
+        }
 
-            let db = inner.interner.get_or_intern(db);
-            inner.positions.entry(db).or_insert(pos);
-            inner
-                .sync_times
-                .entry(db)
-                .or_insert(time::SystemTime::now());
-            inner.conns.entry(db).and_modify(|c| *c += 1).or_insert(1);
+        pub(crate) fn open_conn(&self, db: &str, pos: Option<ltx::Pos>) {
+            let sym = self.sym(db);
+
+            self.dbs
+                .lock()
+                .unwrap()
+                .entry(sym)
+                .and_modify(|db| db.conns += 1)
+                .or_insert(Db {
+                    position: pos,
+                    changes: None,
+                    conns: 1,
+                    last_sync: time::SystemTime::now(),
+                });
 
             self.notify();
         }
 
         pub(crate) fn close_conn(&self, db: &str) {
-            let mut inner = self.inner.lock().unwrap();
+            let sym = self.sym(db);
 
-            let db = inner.interner.get(db).unwrap();
+            let mut dbs = self.dbs.lock().unwrap();
             let remove = {
-                let c = inner.conns.get_mut(&db).unwrap();
-                *c -= 1;
-                *c == 0
+                let db = dbs.get_mut(&sym).unwrap();
+
+                assert!(db.conns > 0);
+                db.conns -= 1;
+                db.conns == 0
             };
 
             if remove {
-                inner.sync_times.remove(&db);
-                inner.positions.remove(&db);
-                inner.changes.remove(&db);
-                inner.conns.remove(&db);
+                dbs.remove(&sym);
             }
 
             self.notify();
         }
 
         pub(crate) fn needs_sync(&self, db: &str, pos: Option<ltx::Pos>) -> bool {
-            let inner = self.inner.lock().unwrap();
+            let sym = self.sym(db);
 
-            let db = inner.interner.get(db).unwrap();
-            let remote_pos = inner.positions.get(&db).copied().flatten();
-            if remote_pos.is_some() || pos != remote_pos {
+            let dbs = self.dbs.lock().unwrap();
+            let db = dbs.get(&sym).unwrap();
+            if db.position.is_some() && db.position != pos {
+                return true;
+            }
+            if db.time_since_last_sync() > self.period {
                 return true;
             }
 
-            if let Some(dur) = inner.time_since_last_sync(db) {
-                dur > self.period
-            } else {
-                false
-            }
+            false
         }
 
         pub(crate) fn get_changes(
@@ -157,98 +146,81 @@ mod native {
             db: &str,
             _pos: Option<ltx::Pos>,
         ) -> io::Result<(Option<ltx::Pos>, Option<super::Changes>)> {
-            let mut inner = self.inner.lock().unwrap();
+            let sym = self.sym(db);
 
-            let db = inner.interner.get(db).unwrap();
-            while inner.time_since_last_sync(db) > Some(self.period) {
+            let mut dbs = self.dbs.lock().unwrap();
+            while dbs.get(&sym).unwrap().time_since_last_sync() > self.period {
                 self.notify();
-                inner = self.cvar.wait(inner).unwrap();
+                dbs = self.cvar.wait(dbs).unwrap();
             }
 
-            Ok((
-                inner.positions.get(&db).copied().flatten(),
-                inner.changes.remove(&db),
-            ))
+            let db = dbs.get_mut(&sym).unwrap();
+
+            Ok((db.position, db.changes.take()))
         }
 
         pub(crate) fn put_changes(&self, db: &str, prev_changes: super::Changes) {
-            let mut inner = self.inner.lock().unwrap();
+            let sym = self.sym(db);
 
-            let db = inner.interner.get(db).unwrap();
-            let new_changes = inner.changes.remove(&db);
-            if let Some(changes) = merge_changes(Some(prev_changes), new_changes) {
-                inner.changes.insert(db, changes);
-            }
+            let mut dbs = self.dbs.lock().unwrap();
+            let db = dbs.get_mut(&sym).unwrap();
+
+            db.changes = merge_changes(Some(prev_changes), db.changes.take())
         }
 
         pub(crate) fn set_pos(&self, db: &str, pos: Option<ltx::Pos>) {
             let pos = if let Some(pos) = pos { pos } else { return };
 
-            let mut inner = self.inner.lock().unwrap();
-            let db = inner.interner.get(db).unwrap();
+            let sym = self.sym(db);
 
-            if matches!(inner.positions.get(&db), Some(Some(remote_pos)) if remote_pos.txid > pos.txid)
-            {
+            let mut dbs = self.dbs.lock().unwrap();
+            let db = dbs.get_mut(&sym).unwrap();
+
+            if matches!(db.position, Some(rp) if rp.txid > pos.txid) {
                 return;
             }
 
-            inner.positions.insert(db, Some(pos));
-            inner.sync_times.insert(db, time::SystemTime::now());
-            inner.changes.remove(&db);
+            db.position = Some(pos);
+            db.last_sync = time::SystemTime::now();
+            db.changes.take();
         }
 
         pub(crate) fn sync(&self) -> io::Result<()> {
             let old_positions = {
-                let inner = self.inner.lock().unwrap();
+                let interner = self.interner.lock().unwrap();
 
-                inner
-                    .positions
+                self.dbs
+                    .lock()
+                    .unwrap()
                     .iter()
-                    .map(|(&k, &v)| (inner.interner.resolve(k).unwrap().to_owned(), v))
+                    .map(|(&k, db)| (interner.resolve(k).unwrap().to_owned(), db.position))
                     .collect()
             };
 
             log::debug!("[syncer] sync: positions = {:?}", old_positions);
-            let changes = self.client.sync(&old_positions)?;
+            let mut changes = self.client.sync(&old_positions)?;
 
-            let mut inner = self.inner.lock().unwrap();
-            let positions = inner
-                .positions
-                .keys()
-                .map(|&k| {
-                    (
-                        k,
+            let interner = self.interner.lock().unwrap();
+            let mut dbs = self.dbs.lock().unwrap();
+            for (&k, db) in dbs.iter_mut() {
+                let name = interner.resolve(k).unwrap();
+                let (new_pos, changes) = if let Some(changes) = changes.remove(name) {
+                    (changes.pos(), changes.into())
+                } else {
+                    (None, None)
+                };
+
+                db.changes = merge_changes(
+                    if old_positions.get(name) == Some(&db.position) {
                         changes
-                            .get(inner.interner.resolve(k).unwrap())
-                            .and_then(|v| v.pos()),
-                    )
-                })
-                .collect();
-            let sync_times = inner
-                .positions
-                .keys()
-                .map(|&k| (k, time::SystemTime::now()))
-                .collect();
-            let changes = changes
-                .into_iter()
-                .filter_map(|(k, v)| {
-                    let ki = inner.interner.get(&k).unwrap();
-
-                    let changes = merge_changes(
-                        if old_positions.get(&k) == inner.positions.get(&ki) {
-                            v.into()
-                        } else {
-                            None
-                        },
-                        inner.changes.remove(&ki),
-                    )?;
-                    Some((ki, changes))
-                })
-                .collect();
-
-            inner.positions = positions;
-            inner.changes = changes;
-            inner.sync_times = sync_times;
+                    } else {
+                        None
+                    },
+                    db.changes.take(),
+                );
+                db.position = new_pos;
+                db.last_sync = time::SystemTime::now();
+            }
 
             self.cvar.notify_all();
 
@@ -263,7 +235,7 @@ mod native {
             use crossbeam_channel::{after, never, select};
 
             loop {
-                let has_dbs = !self.inner.lock().unwrap().positions.is_empty();
+                let has_dbs = !self.dbs.lock().unwrap().is_empty();
                 let waiter = if has_dbs {
                     if let Err(err) = self.sync() {
                         log::warn!("[syncer] run: sync failed: {:?}", err);
