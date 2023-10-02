@@ -616,13 +616,28 @@ impl DatabaseHandle for LiteDatabaseHandle {
             ("litevfs_cache_sync_period", None) => Some(Ok(Some(
                 format_duration(self.syncer.sync_period(&self.name)).to_string(),
             ))),
-            ("litevfs_cache_sync_period", Some(val)) => match parse_duration(val) {
-                Ok(val) => {
-                    self.syncer.set_sync_period(&self.name, val);
-                    Some(Ok(None))
+            ("litevfs_cache_sync_period", Some(val)) => {
+                let val = if val
+                    .chars()
+                    .last()
+                    .map(|c| c.is_ascii_digit())
+                    .unwrap_or_default()
+                {
+                    val.parse()
+                        .map(time::Duration::from_secs)
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
+                } else {
+                    parse_duration(val).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
+                };
+
+                match val {
+                    Ok(val) => {
+                        self.syncer.set_sync_period(&self.name, val);
+                        Some(Ok(None))
+                    }
+                    Err(e) => Some(Err(e)),
                 }
-                Err(e) => Some(Err(io::Error::new(io::ErrorKind::InvalidInput, e))),
-            },
+            }
 
             ("litevfs_max_prefetch_pages", None) => Some(Ok(Some(
                 self.database.read().unwrap().prefetch_limit.to_string(),
