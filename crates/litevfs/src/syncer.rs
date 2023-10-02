@@ -36,6 +36,7 @@ mod native {
         sync::{Arc, Condvar, Mutex},
         thread, time,
     };
+    use string_interner::{DefaultSymbol, StringInterner};
 
     pub(crate) struct Syncer {
         client: Arc<lfsc::Client>,
@@ -47,19 +48,21 @@ mod native {
     }
 
     struct Inner {
+        interner: StringInterner,
+
         // latest known position
-        positions: HashMap<String, Option<ltx::Pos>>,
+        positions: HashMap<DefaultSymbol, Option<ltx::Pos>>,
         // changes accumulated since the last DB sync
-        changes: HashMap<String, super::Changes>,
+        changes: HashMap<DefaultSymbol, super::Changes>,
         // numer of open connections per DB
-        conns: HashMap<String, u32>,
+        conns: HashMap<DefaultSymbol, u32>,
         // last time when a sync was performed for DB
-        sync_times: HashMap<String, time::SystemTime>,
+        sync_times: HashMap<DefaultSymbol, time::SystemTime>,
     }
 
     impl Inner {
-        fn time_since_last_sync(&self, db: &str) -> Option<time::Duration> {
-            let last_sync = if let Some(last_sync) = self.sync_times.get(db) {
+        fn time_since_last_sync(&self, db: DefaultSymbol) -> Option<time::Duration> {
+            let last_sync = if let Some(last_sync) = self.sync_times.get(&db) {
                 *last_sync
             } else {
                 return None;
@@ -81,6 +84,7 @@ mod native {
                 notifier: tx,
                 period,
                 inner: Mutex::new(Inner {
+                    interner: StringInterner::new(),
                     positions: HashMap::new(),
                     changes: HashMap::new(),
                     conns: HashMap::new(),
@@ -100,15 +104,14 @@ mod native {
 
         pub(crate) fn open_conn(&self, db: &str, pos: Option<ltx::Pos>) {
             let mut inner = self.inner.lock().unwrap();
-            if !inner.positions.contains_key(db) {
-                inner.positions.insert(db.into(), pos);
-                inner.sync_times.insert(db.into(), time::SystemTime::now());
-            }
+
+            let db = inner.interner.get_or_intern(db);
+            inner.positions.entry(db).or_insert(pos);
             inner
-                .conns
-                .entry(db.into())
-                .and_modify(|c| *c += 1)
-                .or_insert(1);
+                .sync_times
+                .entry(db)
+                .or_insert(time::SystemTime::now());
+            inner.conns.entry(db).and_modify(|c| *c += 1).or_insert(1);
 
             self.notify();
         }
@@ -116,17 +119,18 @@ mod native {
         pub(crate) fn close_conn(&self, db: &str) {
             let mut inner = self.inner.lock().unwrap();
 
+            let db = inner.interner.get(db).unwrap();
             let remove = {
-                let c = inner.conns.get_mut(db).unwrap();
+                let c = inner.conns.get_mut(&db).unwrap();
                 *c -= 1;
                 *c == 0
             };
 
             if remove {
-                inner.sync_times.remove(db);
-                inner.positions.remove(db);
-                inner.changes.remove(db);
-                inner.conns.remove(db);
+                inner.sync_times.remove(&db);
+                inner.positions.remove(&db);
+                inner.changes.remove(&db);
+                inner.conns.remove(&db);
             }
 
             self.notify();
@@ -135,8 +139,9 @@ mod native {
         pub(crate) fn needs_sync(&self, db: &str, pos: Option<ltx::Pos>) -> bool {
             let inner = self.inner.lock().unwrap();
 
-            let remote_pos = inner.positions.get(db).copied().flatten();
-            if pos.is_none() || remote_pos.is_some() || remote_pos != pos {
+            let db = inner.interner.get(db).unwrap();
+            let remote_pos = inner.positions.get(&db).copied().flatten();
+            if remote_pos.is_some() || pos != remote_pos {
                 return true;
             }
 
@@ -154,22 +159,25 @@ mod native {
         ) -> io::Result<(Option<ltx::Pos>, Option<super::Changes>)> {
             let mut inner = self.inner.lock().unwrap();
 
+            let db = inner.interner.get(db).unwrap();
             while inner.time_since_last_sync(db) > Some(self.period) {
                 self.notify();
                 inner = self.cvar.wait(inner).unwrap();
             }
 
             Ok((
-                inner.positions.get(db).copied().flatten(),
-                inner.changes.remove(db),
+                inner.positions.get(&db).copied().flatten(),
+                inner.changes.remove(&db),
             ))
         }
 
         pub(crate) fn put_changes(&self, db: &str, prev_changes: super::Changes) {
             let mut inner = self.inner.lock().unwrap();
-            let new_changes = inner.changes.remove(db);
+
+            let db = inner.interner.get(db).unwrap();
+            let new_changes = inner.changes.remove(&db);
             if let Some(changes) = merge_changes(Some(prev_changes), new_changes) {
-                inner.changes.insert(db.into(), changes);
+                inner.changes.insert(db, changes);
             }
         }
 
@@ -177,45 +185,64 @@ mod native {
             let pos = if let Some(pos) = pos { pos } else { return };
 
             let mut inner = self.inner.lock().unwrap();
-            if matches!(inner.positions.get(db), Some(Some(remote_pos)) if remote_pos.txid > pos.txid)
+            let db = inner.interner.get(db).unwrap();
+
+            if matches!(inner.positions.get(&db), Some(Some(remote_pos)) if remote_pos.txid > pos.txid)
             {
                 return;
             }
 
-            inner.positions.insert(db.to_string(), Some(pos));
-            inner.changes.remove(db);
+            inner.positions.insert(db, Some(pos));
+            inner.sync_times.insert(db, time::SystemTime::now());
+            inner.changes.remove(&db);
         }
 
         pub(crate) fn sync(&self) -> io::Result<()> {
-            let old_positions = self.inner.lock().unwrap().positions.clone();
+            let old_positions = {
+                let inner = self.inner.lock().unwrap();
+
+                inner
+                    .positions
+                    .iter()
+                    .map(|(&k, &v)| (inner.interner.resolve(k).unwrap().to_owned(), v))
+                    .collect()
+            };
 
             log::debug!("[syncer] sync: positions = {:?}", old_positions);
             let changes = self.client.sync(&old_positions)?;
 
             let mut inner = self.inner.lock().unwrap();
-
             let positions = inner
                 .positions
                 .keys()
-                .map(|k| (k.to_string(), changes.get(k).and_then(|v| v.pos())))
+                .map(|&k| {
+                    (
+                        k,
+                        changes
+                            .get(inner.interner.resolve(k).unwrap())
+                            .and_then(|v| v.pos()),
+                    )
+                })
                 .collect();
             let sync_times = inner
                 .positions
                 .keys()
-                .map(|k| (k.to_string(), time::SystemTime::now()))
+                .map(|&k| (k, time::SystemTime::now()))
                 .collect();
             let changes = changes
                 .into_iter()
                 .filter_map(|(k, v)| {
+                    let ki = inner.interner.get(&k).unwrap();
+
                     let changes = merge_changes(
-                        if old_positions.get(&k) == inner.positions.get(&k) {
+                        if old_positions.get(&k) == inner.positions.get(&ki) {
                             v.into()
                         } else {
                             None
                         },
-                        inner.changes.remove(&k),
+                        inner.changes.remove(&ki),
                     )?;
-                    Some((k, changes))
+                    Some((ki, changes))
                 })
                 .collect();
 
