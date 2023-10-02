@@ -33,7 +33,7 @@ libc = "0.2"
 winapi = { version = "0.3", features = ["std", "fileapi"] }
 
 [target.'cfg(not(target_os = "emscripten"))'.dependencies]
-ureq = { version = "2.7", features = ["json"] }
+ureq = { version = "2.8", features = ["json"] }
 
 [target.'cfg(target_os = "emscripten")'.dependencies]
 emscripten-sys = { path = "../emscripten-sys" }
