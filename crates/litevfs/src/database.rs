@@ -154,7 +154,7 @@ pub(crate) struct Database {
     ltx_path: PathBuf,
     pub(crate) journal_path: PathBuf,
     pub(crate) page_size: Option<ltx::PageSize>,
-    committed_db_size: Option<ltx::PageNum>,
+    committed_db_size: Mutex<Option<ltx::PageNum>>,
     current_db_size: Option<ltx::PageNum>,
     pub(crate) pos: Option<ltx::Pos>,
     dirty_pages: BTreeMap<ltx::PageNum, Option<ltx::Checksum>>,
@@ -210,7 +210,7 @@ impl Database {
             ltx_path,
             journal_path,
             page_size,
-            committed_db_size: commit,
+            committed_db_size: Mutex::new(commit),
             current_db_size: commit,
             pos,
             dirty_pages: BTreeMap::new(),
@@ -351,12 +351,13 @@ impl Database {
             }
         }
 
-        if offset as usize <= sqlite::WRITE_VERSION_OFFSET
-            && offset as usize + buf.len() >= sqlite::READ_VERSION_OFFSET
-            && self.wal
-        {
+        if offset <= sqlite::HEADER_SIZE {
             buf[sqlite::WRITE_VERSION_OFFSET - offset as usize] = u8::to_be(1);
             buf[sqlite::READ_VERSION_OFFSET - offset as usize] = u8::to_be(1);
+            if let PageSource::Remote = source {
+                *self.committed_db_size.lock().unwrap() =
+                    Some(Database::parse_commit_database(buf)?);
+            }
         }
 
         Ok(source)
@@ -461,7 +462,7 @@ impl Database {
             }
         };
 
-        self.committed_db_size = self.current_db_size;
+        *self.committed_db_size.lock().unwrap() = self.current_db_size;
         self.dirty_pages.clear();
         let pos = ltx::Pos {
             txid,
@@ -475,7 +476,7 @@ impl Database {
     }
 
     fn commit_journal_inner(&mut self, txid: ltx::TXID) -> io::Result<ltx::Checksum> {
-        if self.current_db_size < self.committed_db_size {
+        if self.current_db_size < *self.committed_db_size.lock().unwrap() {
             log::warn!(
                 "[database] commit_journal: db = {}: VACUUM is not supported by LiteVFS",
                 self.name
