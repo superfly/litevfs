@@ -198,6 +198,26 @@ mod native {
             db.changes.take();
         }
 
+        pub(crate) fn sync_one(&self, db: &str) -> io::Result<()> {
+            let sym = self.sym(db);
+            let pos = self.dbs.lock().unwrap().get(&sym).unwrap().position;
+
+            let changes = self.client.sync_db(db, pos)?;
+
+            self.dbs.lock().unwrap().entry(sym).and_modify(|db| {
+                let local_txid = db.position.map(|p| p.txid.into_inner()).unwrap_or(0);
+                let remote_txid = changes.pos().map(|p| p.txid.into_inner()).unwrap_or(0);
+
+                if remote_txid >= local_txid {
+                    db.position = changes.pos();
+                    db.changes = merge_changes(changes.into(), db.changes.take());
+                    db.last_sync = time::SystemTime::now();
+                }
+            });
+
+            Ok(())
+        }
+
         pub(crate) fn sync_period(&self, db: &str) -> time::Duration {
             let sym = self.sym(db);
 
@@ -212,7 +232,7 @@ mod native {
             self.notify();
         }
 
-        pub(crate) fn sync(&self, db_syms: &[DefaultSymbol]) -> io::Result<()> {
+        fn sync(&self, db_syms: &[DefaultSymbol]) -> io::Result<()> {
             let old_positions = {
                 let interner = self.interner.lock().unwrap();
                 let dbs = self.dbs.lock().unwrap();
@@ -255,26 +275,6 @@ mod native {
             }
 
             self.cvar.notify_all();
-
-            Ok(())
-        }
-
-        pub(crate) fn sync_one(&self, db: &str) -> io::Result<()> {
-            let sym = self.sym(db);
-            let pos = self.dbs.lock().unwrap().get(&sym).unwrap().position;
-
-            let changes = self.client.sync_db(db, pos)?;
-
-            self.dbs.lock().unwrap().entry(sym).and_modify(|db| {
-                let local_txid = db.position.map(|p| p.txid.into_inner()).unwrap_or(0);
-                let remote_txid = changes.pos().map(|p| p.txid.into_inner()).unwrap_or(0);
-
-                if remote_txid >= local_txid {
-                    db.position = changes.pos();
-                    db.changes = merge_changes(changes.into(), db.changes.take());
-                    db.last_sync = time::SystemTime::now();
-                }
-            });
 
             Ok(())
         }
@@ -365,43 +365,70 @@ mod emscripten {
 
     pub(crate) struct Syncer {
         client: Arc<lfsc::Client>,
-        sync_times: Mutex<HashMap<String, time::SystemTime>>,
         period: time::Duration,
+
+        dbs: Mutex<HashMap<String, Db>>,
+    }
+
+    struct Db {
+        last_sync: time::SystemTime,
+        period: time::Duration,
+    }
+
+    impl Db {
+        fn sync_period(&self) -> Option<time::Duration> {
+            if self.period.is_zero() {
+                return None;
+            }
+
+            Some(self.period)
+        }
+
+        fn next_sync(&self) -> Option<time::SystemTime> {
+            self.last_sync.checked_add(self.sync_period()?)
+        }
+
+        fn needs_sync(&self, now: &time::SystemTime) -> bool {
+            if let Some(ref ns) = self.next_sync() {
+                return ns <= now;
+            }
+
+            false
+        }
     }
 
     impl Syncer {
         pub(crate) fn new(client: Arc<lfsc::Client>, period: time::Duration) -> Arc<Syncer> {
             Arc::new(Syncer {
                 client,
-                sync_times: Mutex::new(HashMap::new()),
                 period,
+
+                dbs: Mutex::new(HashMap::new()),
             })
         }
 
         pub(crate) fn open_conn(&self, db: &str, _pos: Option<ltx::Pos>) {
-            let mut sync_times = self.sync_times.lock().unwrap();
+            let mut dbs = self.dbs.lock().unwrap();
 
-            if !sync_times.contains_key(db) {
-                sync_times.insert(db.to_string(), time::SystemTime::now());
+            if !dbs.contains_key(db) {
+                dbs.insert(
+                    db.to_string(),
+                    Db {
+                        last_sync: time::SystemTime::now(),
+                        period: self.period,
+                    },
+                );
             }
         }
 
         pub(crate) fn close_conn(&self, _db: &str) {}
 
         pub(crate) fn needs_sync(&self, db: &str, _pos: Option<ltx::Pos>) -> bool {
-            let last_sync = if let Some(last_sync) = self.sync_times.lock().unwrap().get(db) {
-                *last_sync
-            } else {
-                return false;
-            };
+            let dbs = self.dbs.lock().unwrap();
 
-            let dur = if let Ok(dur) = time::SystemTime::now().duration_since(last_sync) {
-                dur
-            } else {
-                return true;
-            };
+            let db = dbs.get(db).unwrap();
 
-            dur > self.period
+            db.needs_sync(&time::SystemTime::now())
         }
 
         pub(crate) fn get_changes(
@@ -411,19 +438,26 @@ mod emscripten {
         ) -> io::Result<(Option<ltx::Pos>, Option<super::Changes>)> {
             let changes = self.client.sync_db(db, pos)?;
 
-            if let Some(last) = self.sync_times.lock().unwrap().get_mut(db) {
-                *last = time::SystemTime::now();
-            };
+            let mut dbs = self.dbs.lock().unwrap();
+            dbs.get_mut(db).unwrap().last_sync = time::SystemTime::now();
 
             Ok((changes.pos(), changes.into()))
         }
 
         pub(crate) fn put_changes(&self, _db: &str, _prev_changes: super::Changes) {}
 
-        pub(crate) fn sync(&self) -> io::Result<()> {
+        pub(crate) fn set_pos(&self, _db: &str, _pos: Option<ltx::Pos>) {}
+
+        pub(crate) fn sync_one(&self, _db: &str) -> io::Result<()> {
             Ok(())
         }
 
-        pub(crate) fn set_pos(&self, _db: &str, _pos: Option<ltx::Pos>) {}
+        pub(crate) fn sync_period(&self, db: &str) -> time::Duration {
+            self.dbs.lock().unwrap().get(db).unwrap().period
+        }
+
+        pub(crate) fn set_sync_period(&self, db: &str, period: time::Duration) {
+            self.dbs.lock().unwrap().get_mut(db).unwrap().period = period;
+        }
     }
 }
