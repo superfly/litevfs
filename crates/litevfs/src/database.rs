@@ -51,7 +51,9 @@ impl DatabaseManager {
         dbname: &str,
         access: OpenAccess,
     ) -> io::Result<Arc<RwLock<Database>>> {
-        let db = if let Some(db) = self.get_database_local(dbname, access)? {
+        let db = if let Some(db) = self.get_database_local_in_mem(dbname, access)? {
+            db
+        } else if let Some(db) = self.get_database_local_on_disk(dbname, access)? {
             db
         } else if let Some(db) = self.get_database_remote(dbname, access)? {
             self.databases.insert(dbname.into(), Arc::clone(&db));
@@ -81,7 +83,7 @@ impl DatabaseManager {
         Ok(db)
     }
 
-    fn get_database_local(
+    fn get_database_local_in_mem(
         &self,
         dbname: &str,
         access: OpenAccess,
@@ -96,6 +98,42 @@ impl DatabaseManager {
         }
 
         Ok(db.map(Arc::clone))
+    }
+
+    fn get_database_local_on_disk(
+        &self,
+        dbname: &str,
+        access: OpenAccess,
+    ) -> io::Result<Option<Arc<RwLock<Database>>>> {
+        let pos = self.pager.db_path(dbname).join("pos");
+        if !pos.try_exists()? {
+            return Ok(None);
+        }
+
+        if access == OpenAccess::CreateNew {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "database already exists",
+            ));
+        }
+
+        let pos = fs::read(pos)?;
+        let pos = serde_json::from_slice(&pos)?;
+        log::info!(
+            "[manager] get_database_local_on_disk: name = {}, access = {:?}, pos = {}",
+            dbname,
+            access,
+            pos
+        );
+
+        Ok(Some(Arc::new(RwLock::new(Database::new(
+            dbname,
+            Some(pos),
+            Arc::clone(&self.pager),
+            Arc::clone(&self.client),
+            Arc::clone(&self.leaser),
+            Arc::clone(&self.syncer),
+        )?))))
     }
 
     fn get_database_remote(
@@ -153,6 +191,7 @@ pub(crate) struct Database {
     leaser: Arc<Leaser>,
     syncer: Arc<Syncer>,
     ltx_path: PathBuf,
+    pos_path: PathBuf,
     pub(crate) journal_path: PathBuf,
     pub(crate) page_size: Option<ltx::PageSize>,
     committed_db_size: Mutex<Option<ltx::PageNum>>,
@@ -175,6 +214,7 @@ impl Database {
         syncer: Arc<Syncer>,
     ) -> io::Result<Database> {
         let ltx_path = pager.db_path(name).join("ltx");
+        let pos_path = pager.db_path(name).join("pos");
         let journal_path = pager.db_path(name).join("journal");
 
         pager.prepare_db(name)?;
@@ -212,6 +252,7 @@ impl Database {
             leaser,
             syncer,
             ltx_path,
+            pos_path,
             journal_path,
             page_size,
             committed_db_size: Mutex::new(commit),
@@ -466,8 +507,8 @@ impl Database {
             ltx::TXID::ONE
         };
 
-        let checksum = match self.commit_journal_inner(txid) {
-            Ok(checksum) => checksum,
+        let pos = match self.commit_journal_inner(txid) {
+            Ok(pos) => pos,
             Err(err) => {
                 // Commit failed, remove the dirty pages so they can
                 // be refetched from LFSC
@@ -482,10 +523,6 @@ impl Database {
 
         *self.committed_db_size.lock().unwrap() = self.current_db_size;
         self.dirty_pages.clear();
-        let pos = ltx::Pos {
-            txid,
-            post_apply_checksum: checksum,
-        };
 
         self.pos = Some(pos);
         self.syncer.set_pos(&self.name, self.pos);
@@ -493,7 +530,7 @@ impl Database {
         Ok(())
     }
 
-    fn commit_journal_inner(&mut self, txid: ltx::TXID) -> io::Result<ltx::Checksum> {
+    fn commit_journal_inner(&mut self, txid: ltx::TXID) -> io::Result<ltx::Pos> {
         if self.current_db_size < *self.committed_db_size.lock().unwrap() {
             log::warn!(
                 "[database] commit_journal: db = {}: VACUUM is not supported by LiteVFS",
@@ -555,7 +592,26 @@ impl Database {
             .write_tx(&self.name, &file, file.metadata()?.len(), &lease)?;
         fs::remove_file(&ltx_path)?;
 
-        Ok(checksum)
+        let pos = ltx::Pos {
+            txid,
+            post_apply_checksum: checksum,
+        };
+
+        self.commit_pos(pos)?;
+
+        Ok(pos)
+    }
+
+    fn commit_pos(&mut self, pos: ltx::Pos) -> io::Result<()> {
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&self.pos_path)?;
+        serde_json::to_writer(&file, &pos)?;
+        file.sync_all()?;
+
+        Ok(())
     }
 
     pub(crate) fn needs_sync(&self) -> bool {
@@ -633,6 +689,10 @@ impl Database {
                 pos
             }
         };
+
+        if let Some(pos) = pos {
+            self.commit_pos(pos)?;
+        }
 
         self.pos = pos;
 
