@@ -407,10 +407,13 @@ impl Database {
         self.ensure_aligned(buf, offset)?;
         let page_num = self.page_num_for(offset)?;
 
-        let orig_checksum = match self.pager.get_page(&self.name, self.pos, page_num, None) {
-            Ok(page) => Some(page.checksum()),
-            Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => None,
-            Err(err) => return Err(err),
+        let orig_checksum = match *self.committed_db_size.lock().unwrap() {
+            Some(dbsize) if page_num > dbsize => None,
+            _ => match self.pager.get_page(&self.name, self.pos, page_num, None) {
+                Ok(page) => Some(page.checksum()),
+                Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => None,
+                Err(err) => return Err(err),
+            },
         };
 
         let page = PageRef::new(page_num, buf);
@@ -594,6 +597,7 @@ impl Database {
                             pgnos.into_iter().take(self.prefetch_limit).collect();
                     }
                 };
+                self.committed_db_size.lock().unwrap().take();
 
                 pos
             }
@@ -621,6 +625,9 @@ impl Database {
                         }
                         _ => (),
                     }
+                    if *pgno == ltx::PageNum::ONE {
+                        self.committed_db_size.lock().unwrap().take();
+                    };
                 }
 
                 pos
