@@ -15,6 +15,7 @@ use std::{
 };
 use string_interner::{DefaultSymbol, StringInterner};
 
+#[derive(PartialEq, Eq)]
 pub(crate) enum PageSource {
     Local,
     Remote,
@@ -72,19 +73,25 @@ impl Pager {
         db: &str,
         pos: Option<ltx::Pos>,
         pgno: ltx::PageNum,
+        prefetch: Option<&[ltx::PageNum]>,
     ) -> io::Result<Page> {
         log::debug!(
-            "[pager] get_page: db = {}, pos = {}, pgno = {}",
+            "[pager] get_page: db = {}, pos = {}, pgno = {}, prefetch = {}",
             db,
             PosLogger(&pos),
             pgno,
+            IterLogger(if let Some(pgnos) = prefetch {
+                pgnos
+            } else {
+                &[]
+            }),
         );
 
         // Request the page either from local cache or from LFSC and convert
         // io::ErrorKind::NotFound errors to io::ErrorKind::UnexpectedEof, as
         // this is what local IO will return in case we read past the file.
         // TODO: we may need to suppress duplicated calls to the same page here.
-        let r = match self.get_page_inner(db, pos, pgno) {
+        let r = match self.get_page_inner(db, pos, pgno, prefetch) {
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
                 Err(io::ErrorKind::UnexpectedEof.into())
             }
@@ -95,10 +102,15 @@ impl Pager {
         match r {
             Err(err) => {
                 log::error!(
-                    "[pager] get_page: db = {}, pos = {}, pgno = {}: {:?}",
+                    "[pager] get_page: db = {}, pos = {}, pgno = {}, prefetch = {}: {:?}",
                     db,
                     PosLogger(&pos),
                     pgno,
+                    IterLogger(if let Some(pgnos) = prefetch {
+                        pgnos
+                    } else {
+                        &[]
+                    }),
                     err
                 );
                 Err(err)
@@ -266,6 +278,7 @@ impl Pager {
         db: &str,
         pos: Option<ltx::Pos>,
         pgno: ltx::PageNum,
+        prefetch: Option<&[ltx::PageNum]>,
     ) -> io::Result<Page> {
         match self.get_page_local(db, pos, pgno) {
             Ok(page) => return Ok(page),
@@ -273,7 +286,7 @@ impl Pager {
             _ => (),
         };
 
-        self.get_page_remote(db, pos, pgno, None)
+        self.get_page_remote(db, pos, pgno, prefetch)
     }
 
     #[allow(clippy::too_many_arguments)]

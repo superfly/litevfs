@@ -1,10 +1,11 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, ops};
 
 use litetx as ltx;
 
 pub(crate) const HEADER_SIZE: u64 = 100;
 pub(crate) const WRITE_VERSION_OFFSET: usize = 18;
 pub(crate) const READ_VERSION_OFFSET: usize = 19;
+pub(crate) const COMMIT_RANGE: ops::Range<usize> = 28..32;
 
 pub(crate) fn prefetch_candidates(
     data: &[u8],
