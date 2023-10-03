@@ -318,7 +318,6 @@ impl Client {
         self.call("GET", u)
     }
 
-    #[allow(dead_code)]
     pub(crate) fn sync_db(&self, db: &str, pos: Option<ltx::Pos>) -> Result<Changes> {
         log::debug!("[lfsc] sync: db = {}, pos = {}", db, PosLogger(&pos));
 

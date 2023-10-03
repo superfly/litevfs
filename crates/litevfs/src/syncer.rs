@@ -261,8 +261,22 @@ mod native {
 
         pub(crate) fn sync_one(&self, db: &str) -> io::Result<()> {
             let sym = self.sym(db);
+            let pos = self.dbs.lock().unwrap().get(&sym).unwrap().position;
 
-            self.sync(&[sym])
+            let changes = self.client.sync_db(db, pos)?;
+
+            self.dbs.lock().unwrap().entry(sym).and_modify(|db| {
+                let local_txid = db.position.map(|p| p.txid.into_inner()).unwrap_or(0);
+                let remote_txid = changes.pos().map(|p| p.txid.into_inner()).unwrap_or(0);
+
+                if remote_txid >= local_txid {
+                    db.position = changes.pos();
+                    db.changes = merge_changes(changes.into(), db.changes.take());
+                    db.last_sync = time::SystemTime::now();
+                }
+            });
+
+            Ok(())
         }
 
         fn notify(&self) {
@@ -291,12 +305,6 @@ mod native {
                 };
                 let next_sync =
                     min_sync_period.map(|p| p.checked_sub(since_last_sync).unwrap_or_default());
-                log::error!(
-                    "{:?} {:?} {:?}",
-                    min_sync_period,
-                    since_last_sync,
-                    next_sync
-                );
 
                 let waiter = if let Some(next_sync) = next_sync {
                     log::debug!("[syncer]: next sync in {}ms", next_sync.as_millis());
