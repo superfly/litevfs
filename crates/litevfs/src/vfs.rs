@@ -485,6 +485,16 @@ impl LiteDatabaseHandle {
 
         Ok(())
     }
+
+    fn cache_db(&mut self) -> io::Result<()> {
+        self.acquire_exclusive()?;
+
+        let ret = self.database.write().unwrap().cache();
+
+        self.release_exclusive();
+
+        ret
+    }
 }
 
 impl Drop for LiteDatabaseHandle {
@@ -664,6 +674,11 @@ impl DatabaseHandle for LiteDatabaseHandle {
                     Err(e) => Some(Err(e)),
                 }
             }
+
+            ("litevfs_cache_db", None) => match self.cache_db() {
+                Ok(()) => Some(Ok(None)),
+                Err(e) => Some(Err(e)),
+            },
             _ => None,
         }
     }

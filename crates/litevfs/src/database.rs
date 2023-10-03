@@ -13,6 +13,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fs,
     io::{self, Read, Seek, SeekFrom},
+    ops,
     path::PathBuf,
     sync::{Arc, Mutex, RwLock},
     time,
@@ -180,12 +181,15 @@ impl Database {
         fs::create_dir_all(&ltx_path)?;
 
         let (wal, auto_vacuum, page_size, commit) =
-            match pager.get_page(name, pos, ltx::PageNum::ONE) {
+            match pager.get_page(name, pos, ltx::PageNum::ONE, None) {
                 Ok(page) => (
                     Database::parse_wal(page.as_ref()),
                     Database::parse_autovacuum(page.as_ref())?,
                     Some(Database::parse_page_size_database(page.as_ref())?),
-                    Some(Database::parse_commit_database(page.as_ref())?),
+                    Some(Database::parse_commit_database(
+                        page.as_ref(),
+                        sqlite::COMMIT_RANGE,
+                    )?),
                 ),
                 Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => {
                     (false, false, None, None)
@@ -251,9 +255,9 @@ impl Database {
         ltx::PageSize::new(page_size).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
-    fn parse_commit_database(page1: &[u8]) -> io::Result<ltx::PageNum> {
+    fn parse_commit_database(page1: &[u8], loc: ops::Range<usize>) -> io::Result<ltx::PageNum> {
         let commit = u32::from_be_bytes(
-            page1[28..32]
+            page1[loc]
                 .try_into()
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
         );
@@ -351,13 +355,23 @@ impl Database {
             }
         }
 
-        if offset <= sqlite::HEADER_SIZE {
-            buf[sqlite::WRITE_VERSION_OFFSET - offset as usize] = u8::to_be(1);
-            buf[sqlite::READ_VERSION_OFFSET - offset as usize] = u8::to_be(1);
-            if let PageSource::Remote = source {
-                *self.committed_db_size.lock().unwrap() =
-                    Some(Database::parse_commit_database(buf)?);
-            }
+        let offset = offset as usize;
+        if offset <= sqlite::WRITE_VERSION_OFFSET
+            && offset + buf.len() >= sqlite::READ_VERSION_OFFSET
+            && self.wal
+        {
+            buf[sqlite::WRITE_VERSION_OFFSET - offset] = u8::to_be(1);
+            buf[sqlite::READ_VERSION_OFFSET - offset] = u8::to_be(1);
+        };
+
+        if offset <= sqlite::COMMIT_RANGE.start
+            && offset + buf.len() >= sqlite::COMMIT_RANGE.end
+            && source == PageSource::Remote
+        {
+            *self.committed_db_size.lock().unwrap() = Some(Database::parse_commit_database(
+                buf,
+                sqlite::COMMIT_RANGE.start - offset..sqlite::COMMIT_RANGE.end - offset,
+            )?);
         }
 
         Ok(source)
@@ -378,7 +392,8 @@ impl Database {
             if self.page_size().is_err() {
                 self.page_size = Some(Database::parse_page_size_database(buf)?);
             }
-            self.current_db_size = Some(Database::parse_commit_database(buf)?);
+            self.current_db_size =
+                Some(Database::parse_commit_database(buf, sqlite::COMMIT_RANGE)?);
         }
 
         _ = self.leaser.get_lease(&self.name)?;
@@ -392,7 +407,7 @@ impl Database {
         self.ensure_aligned(buf, offset)?;
         let page_num = self.page_num_for(offset)?;
 
-        let orig_checksum = match self.pager.get_page(&self.name, self.pos, page_num) {
+        let orig_checksum = match self.pager.get_page(&self.name, self.pos, page_num, None) {
             Ok(page) => Some(page.checksum()),
             Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => None,
             Err(err) => return Err(err),
@@ -519,7 +534,7 @@ impl Database {
             .unwrap_or(0);
         let mut pages = Vec::with_capacity(self.dirty_pages.len());
         for (&page_num, &prev_checksum) in self.dirty_pages.iter().filter(|&(&n, _)| n <= commit) {
-            let page = self.pager.get_page(&self.name, self.pos, page_num)?;
+            let page = self.pager.get_page(&self.name, self.pos, page_num, None)?;
             if let Some(prev_checksum) = prev_checksum {
                 checksum ^= prev_checksum.into_inner();
             };
@@ -613,6 +628,42 @@ impl Database {
         };
 
         self.pos = pos;
+
+        Ok(())
+    }
+
+    pub(crate) fn cache(&mut self) -> io::Result<()> {
+        self.sync(true)?;
+
+        // Make sure we have up-to-date view of the DB header
+        let mut header = [0; sqlite::HEADER_SIZE as usize];
+        self.read_at(&mut header, 0, false)?;
+
+        let dbsize = self
+            .committed_db_size
+            .lock()
+            .unwrap()
+            .ok_or(io::Error::new(
+                io::ErrorKind::Other,
+                "database size unknown",
+            ))?;
+
+        let mut pgnos = Vec::with_capacity(MAX_MAX_PREFETCH_PAGES);
+        for pgno in 1..=dbsize.into_inner() {
+            let pgno = ltx::PageNum::new(pgno).unwrap();
+
+            if self.pager.has_page(&self.name, pgno)? {
+                continue;
+            }
+
+            if pgno == dbsize || pgnos.len() == MAX_MAX_PREFETCH_PAGES {
+                self.pager
+                    .get_page(&self.name, self.pos, pgno, Some(&pgnos))?;
+                pgnos.clear();
+            } else {
+                pgnos.push(pgno);
+            }
+        }
 
         Ok(())
     }
