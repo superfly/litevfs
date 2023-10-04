@@ -9,8 +9,9 @@ mod sqlite;
 mod syncer;
 mod vfs;
 
+use litetx as ltx;
 use sqlite_vfs::ffi;
-use std::fmt;
+use std::{collections::HashMap, fmt};
 
 /// A custom SQLite error code to indicate that LFSC no longer have the
 /// required state and LiteVFS can't recover from this in the middle of
@@ -47,6 +48,23 @@ where
                 write!(f, ", ")?;
             }
             write!(f, "{}", pgno)?;
+        }
+
+        write!(f, "]")
+    }
+}
+
+struct PositionsLogger<'a>(&'a HashMap<String, Option<ltx::Pos>>);
+
+impl<'a> fmt::Display for PositionsLogger<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[")?;
+
+        for (i, (db, pos)) in self.0.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{}={}", db, OptionLogger(pos))?;
         }
 
         write!(f, "]")

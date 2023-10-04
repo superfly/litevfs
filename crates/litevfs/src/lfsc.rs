@@ -1,4 +1,4 @@
-use crate::{http, IterLogger, OptionLogger};
+use crate::{http, IterLogger, OptionLogger, PositionsLogger};
 use litetx as ltx;
 use std::{collections::HashMap, env, fmt, io, sync};
 
@@ -172,22 +172,6 @@ impl fmt::Display for Lease {
     }
 }
 
-struct PositionsLogger<'a>(&'a HashMap<String, Option<ltx::Pos>>);
-
-impl<'a> fmt::Display for PositionsLogger<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[")?;
-
-        for (i, (db, pos)) in self.0.iter().enumerate() {
-            if i > 0 {
-                write!(f, ", ")?;
-            }
-            write!(f, "{}={}", db, OptionLogger(pos))?;
-        }
-
-        write!(f, "]")
-    }
-}
 impl Client {
     const CLUSTER_ID_LEN: usize = 20;
     const CLUSTER_ID_PREFIX: &'static str = "LFSC";
@@ -225,10 +209,10 @@ impl Client {
         client.set_cluster_id(Client::generate_cluster_id());
 
         log::info!(
-            "[lfsc] from_env: host = {}, cluster = {:?}, cluster_id = {:?}",
+            "[lfsc] from_env: host = {}, cluster = {}, cluster_id = {}",
             client.host,
-            client.cluster,
-            client.cluster_id
+            OptionLogger(&client.cluster),
+            OptionLogger(&client.cluster_id),
         );
 
         Ok(client)

@@ -51,7 +51,7 @@ mod native {
                     lease
                 }
                 Err(err) => {
-                    log::warn!("[leaser] acquire_lease: db = {}: {:?}", db, err);
+                    log::warn!("[leaser] acquire_lease: db = {}: {}", db, err);
                     return Err(err.into());
                 }
             };
@@ -69,7 +69,7 @@ mod native {
                         log::debug!("[leaser] release_lease: db = {}", db);
                     }
                     Err(err) => {
-                        log::warn!("[leaser] release_lease: db = {}: {:?}", db, err);
+                        log::warn!("[leaser] release_lease: db = {}: {}", db, err);
                         return Err(err.into());
                     }
                 };
@@ -139,7 +139,7 @@ mod native {
                             self.leases.lock().unwrap().entry(db).and_modify(|old_lease| *old_lease = lease);
                         },
                         Err(err) => {
-                            log::warn!("[leaser] failed to refresh lease: db = {}, lease = {}: {:?}", db, lease, err);
+                            log::warn!("[leaser] failed to refresh lease: db = {}, lease = {}: {}", db, lease, err);
                             // It's possible a new one has been acquired
                             let mut leases = self.leases.lock().unwrap();
                             match leases.get(&db) {
