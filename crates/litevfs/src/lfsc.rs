@@ -76,6 +76,7 @@ struct LfscErrorRepr {
 
 /// A LiteFS Cloud client.
 pub(crate) struct Client {
+    client: http::Client,
     host: url::Url,
     token: Option<String>,
     cluster: Option<String>,
@@ -553,7 +554,7 @@ impl Client {
             u.query_pairs_mut().append_pair("cluster", cluster);
         }
 
-        let mut req = http::Request::new(method, &u);
+        let mut req = self.client.request(method, &u);
         if let Some(ref token) = self.token {
             req = req.set("Authorization", token);
         }
@@ -629,6 +630,7 @@ impl ClientBuilder {
 
     pub(crate) fn build(self) -> Client {
         Client {
+            client: http::Client::new(),
             host: self
                 .host
                 .unwrap_or(url::Url::parse("https://litefs.fly.io").unwrap()),

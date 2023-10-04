@@ -1,8 +1,8 @@
 #[cfg(not(target_os = "emscripten"))]
-pub(crate) use native::{Request, Response};
+pub(crate) use native::{Client, Request, Response};
 
 #[cfg(target_os = "emscripten")]
-pub(crate) use emscripten::{Request, Response};
+pub(crate) use emscripten::{Client, Request, Response};
 
 pub(crate) enum Error {
     Status(u16, Box<Response>),
@@ -15,6 +15,7 @@ mod native {
     use std::io::Read;
     use url::Url;
 
+    pub(crate) struct Client(ureq::Agent);
     pub(crate) struct Request(ureq::Request);
     pub(crate) struct Response(ureq::Response);
 
@@ -25,11 +26,22 @@ mod native {
         }
     }
 
-    impl Request {
-        pub(crate) fn new(method: &str, url: &Url) -> Request {
-            Request(ureq::request_url(method, url))
+    impl Client {
+        pub(crate) fn new() -> Client {
+            Client(
+                ureq::AgentBuilder::new()
+                    .user_agent(&format!("LiteVFS/{}", env!("CARGO_PKG_VERSION")))
+                    .try_proxy_from_env(true)
+                    .build(),
+            )
         }
 
+        pub(crate) fn request(&self, method: &str, url: &Url) -> Request {
+            Request(self.0.request_url(method, url))
+        }
+    }
+
+    impl Request {
         pub(crate) fn set(self, header: &str, value: &str) -> Self {
             Request(self.0.set(header, value))
         }
@@ -93,6 +105,8 @@ mod emscripten {
         }
     }
 
+    pub(crate) struct Client;
+
     pub(crate) struct Request {
         method: String,
         url: CString,
@@ -105,15 +119,21 @@ mod emscripten {
         headers: Vec<Header>,
     }
 
-    impl Request {
-        pub(crate) fn new(method: &str, url: &Url) -> Request {
+    impl Client {
+        pub(crate) fn new() -> Client {
+            Client
+        }
+
+        pub(crate) fn request(&self, method: &str, url: &Url) -> Request {
             Request {
                 method: method.into(),
                 url: CString::new(url.as_str()).unwrap(),
                 headers: Vec::new(),
             }
         }
+    }
 
+    impl Request {
         pub(crate) fn set(mut self, header: &str, value: &str) -> Self {
             let combined = format!("{}\0{}\0", header, value);
             self.headers.retain(|h| h.name() != header);
