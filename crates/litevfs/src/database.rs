@@ -635,9 +635,9 @@ impl Database {
         self.syncer.needs_sync(&self.name, self.pos)
     }
 
-    pub(crate) fn sync(&mut self, force: bool) -> io::Result<()> {
+    pub(crate) fn sync(&mut self, force: bool, deep: bool) -> io::Result<()> {
         if force {
-            self.syncer.sync_one(&self.name)?;
+            self.syncer.sync_one(&self.name, deep)?;
         }
 
         let pos = match self.syncer.get_changes(&self.name, self.pos)? {
@@ -717,7 +717,7 @@ impl Database {
     }
 
     pub(crate) fn cache(&mut self) -> io::Result<()> {
-        self.sync(true)?;
+        self.sync(true, true)?;
 
         // Make sure we have up-to-date view of the DB header
         let mut header = [0; sqlite::HEADER_SIZE];

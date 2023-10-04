@@ -198,8 +198,12 @@ mod native {
             db.changes.take();
         }
 
-        pub(crate) fn sync_one(&self, db: &str) -> io::Result<()> {
+        pub(crate) fn sync_one(&self, db: &str, deep: bool) -> io::Result<()> {
             let sym = self.sym(db);
+            if !deep {
+                return self.sync(&[sym]);
+            }
+
             let pos = self.dbs.lock().unwrap().get(&sym).unwrap().position;
 
             let changes = self.client.sync_db(db, pos)?;
@@ -439,7 +443,14 @@ mod emscripten {
             db: &str,
             pos: Option<ltx::Pos>,
         ) -> io::Result<(Option<ltx::Pos>, Option<super::Changes>)> {
-            let changes = self.client.sync_db(db, pos)?;
+            let mut dbs = HashMap::new();
+            dbs.insert(db.into(), pos);
+            let mut changes = self.client.sync(&dbs)?;
+            let changes = if let Some(changes) = changes.remove(db) {
+                changes
+            } else {
+                return Ok((pos, None));
+            };
 
             let mut dbs = self.dbs.lock().unwrap();
             dbs.get_mut(db).unwrap().last_sync = time::SystemTime::now();
@@ -451,7 +462,7 @@ mod emscripten {
 
         pub(crate) fn set_pos(&self, _db: &str, _pos: Option<ltx::Pos>) {}
 
-        pub(crate) fn sync_one(&self, _db: &str) -> io::Result<()> {
+        pub(crate) fn sync_one(&self, _db: &str, _deep: bool) -> io::Result<()> {
             Ok(())
         }
 
