@@ -9,7 +9,6 @@ mod sqlite;
 mod syncer;
 mod vfs;
 
-use litetx as ltx;
 use sqlite_vfs::ffi;
 use std::fmt;
 
@@ -19,12 +18,15 @@ use std::fmt;
 /// collide with an upstream's error code.
 const LITEVFS_IOERR_POS_MISMATCH: i32 = ffi::SQLITE_IOERR | (0x504F53 << 8);
 
-struct PosLogger<'a>(&'a Option<ltx::Pos>);
+struct OptionLogger<'a, T>(&'a Option<T>);
 
-impl<'a> fmt::Display for PosLogger<'a> {
+impl<'a, T> fmt::Display for OptionLogger<'a, T>
+where
+    T: fmt::Display,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        if let Some(pos) = self.0 {
-            pos.fmt(f)
+        if let Some(inner) = self.0 {
+            inner.fmt(f)
         } else {
             write!(f, "<unknown>")
         }

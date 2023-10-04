@@ -99,7 +99,7 @@ impl Vfs for LiteVfs {
         };
 
         if let Err(ref err) = res {
-            log::error!("[vfs] open: db = {}, opts = {:?}: {:?}", db, opts, err,);
+            log::error!("[vfs] open: db = {}, opts = {:?}: {}", db, opts, err);
         }
 
         res
@@ -253,7 +253,7 @@ impl sqlite_vfs::DatabaseHandle for LiteHandle {
         match self.inner.size() {
             Err(err) => {
                 log::error!(
-                    "[handle] size: type = {}, name = {}: {:?}",
+                    "[handle] size: type = {}, name = {}: {}",
                     self.inner.handle_type(),
                     self.inner.handle_name(),
                     err,
@@ -278,7 +278,7 @@ impl sqlite_vfs::DatabaseHandle for LiteHandle {
                 }
 
                 log::error!(
-                    "[handle] read_exact_at: type = {}, name = {}, len = {}, offset = {}: {:?}",
+                    "[handle] read_exact_at: type = {}, name = {}, len = {}, offset = {}: {}",
                     self.inner.handle_type(),
                     self.inner.handle_name(),
                     buf.len(),
@@ -296,7 +296,7 @@ impl sqlite_vfs::DatabaseHandle for LiteHandle {
         match self.inner.write_all_at(buf, offset) {
             Err(err) => {
                 log::error!(
-                    "[handle] write_all_at: type = {}, name = {}, len = {}, offset = {}: {:?}",
+                    "[handle] write_all_at: type = {}, name = {}, len = {}, offset = {}: {}",
                     self.inner.handle_type(),
                     self.inner.handle_name(),
                     buf.len(),
@@ -314,7 +314,7 @@ impl sqlite_vfs::DatabaseHandle for LiteHandle {
         match self.inner.sync(data_only) {
             Err(err) => {
                 log::error!(
-                    "[handle] sync: type = {}, name = {}, data_only = {}: {:?}",
+                    "[handle] sync: type = {}, name = {}, data_only = {}: {}",
                     self.inner.handle_type(),
                     self.inner.handle_name(),
                     data_only,
@@ -331,7 +331,7 @@ impl sqlite_vfs::DatabaseHandle for LiteHandle {
         match self.inner.set_len(size) {
             Err(err) => {
                 log::error!(
-                    "[handle] set_len: type = {}, name = {}, size = {}: {:?}",
+                    "[handle] set_len: type = {}, name = {}, size = {}: {}",
                     self.inner.handle_type(),
                     self.inner.handle_name(),
                     size,
@@ -365,7 +365,7 @@ impl sqlite_vfs::DatabaseHandle for LiteHandle {
             Some(Err(err)) => {
                 let val = if let Some(val) = val { val } else { "<none>" };
                 log::error!(
-                    "[handle] pragma: pragma = {}, value = {}: {:?}",
+                    "[handle] pragma: pragma = {}, value = {}: {}",
                     pragma,
                     val,
                     err

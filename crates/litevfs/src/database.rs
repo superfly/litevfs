@@ -5,7 +5,7 @@ use crate::{
     pager::{PageRef, PageSource, Pager},
     sqlite,
     syncer::{Changes, Syncer},
-    IterLogger, PosLogger,
+    IterLogger, OptionLogger,
 };
 use litetx as ltx;
 use sqlite_vfs::OpenAccess;
@@ -159,7 +159,7 @@ impl DatabaseManager {
             "[manager] get_database_remote: name = {}, access = {:?}, pos = {}",
             dbname,
             access,
-            PosLogger(&pos)
+            OptionLogger(&pos)
         );
 
         Ok(Some(Arc::new(RwLock::new(Database::new(
@@ -368,7 +368,7 @@ impl Database {
         offset: u64,
         local_only: bool,
     ) -> io::Result<PageSource> {
-        let (number, offset) = if offset <= sqlite::HEADER_SIZE {
+        let (number, page_offset) = if offset <= sqlite::HEADER_SIZE as u64 {
             (ltx::PageNum::ONE, offset)
         } else {
             self.ensure_aligned(buf, offset)?;
@@ -380,13 +380,13 @@ impl Database {
             self.pos,
             number,
             buf,
-            offset,
+            page_offset,
             local_only,
             self.prefetch_pages(number),
         )?;
 
-        let mut prefetch = self.prefetch_pages.lock().unwrap();
         if self.can_prefetch(buf) {
+            let mut prefetch = self.prefetch_pages.lock().unwrap();
             if let Some(candidates) = sqlite::prefetch_candidates(buf, number).map(|t| {
                 t.into_iter()
                     .filter(|&pgno| !self.pager.has_page(&self.name, pgno).unwrap_or(false))
@@ -407,7 +407,7 @@ impl Database {
 
         if offset <= sqlite::COMMIT_RANGE.start
             && offset + buf.len() >= sqlite::COMMIT_RANGE.end
-            && source == PageSource::Remote
+            && !self.dirty_pages.contains_key(&ltx::PageNum::ONE)
         {
             *self.committed_db_size.lock().unwrap() = Some(Database::parse_commit_database(
                 buf,
@@ -429,7 +429,7 @@ impl Database {
     }
 
     pub(crate) fn write_at(&mut self, buf: &[u8], offset: u64) -> io::Result<()> {
-        if offset == 0 && buf.len() >= (sqlite::HEADER_SIZE as usize) {
+        if offset == 0 && buf.len() >= sqlite::HEADER_SIZE {
             if self.page_size().is_err() {
                 self.page_size = Some(Database::parse_page_size_database(buf)?);
             }
@@ -507,9 +507,26 @@ impl Database {
             ltx::TXID::ONE
         };
 
+        log::debug!(
+            "[database] commit_journal: db = {}, pos = {}, committed_size = {}, current_size = {}",
+            self.name,
+            OptionLogger(&self.pos),
+            OptionLogger(&self.committed_db_size.lock().unwrap()),
+            OptionLogger(&self.current_db_size),
+        );
+
         let pos = match self.commit_journal_inner(txid) {
             Ok(pos) => pos,
             Err(err) => {
+                log::error!(
+                    "[database] commit_journal: db = {}, pos = {}, committed_size = {}, current_size = {}: {}",
+                    self.name,
+                    OptionLogger(&self.pos),
+                    OptionLogger(&self.committed_db_size.lock().unwrap()),
+                    OptionLogger(&self.current_db_size),
+                    err,
+                );
+
                 // Commit failed, remove the dirty pages so they can
                 // be refetched from LFSC
                 for &page_num in self.dirty_pages.keys() {
@@ -629,8 +646,8 @@ impl Database {
                 log::debug!(
                     "[database] sync: db = {}, prev_pos = {}, pos = {}, no changes",
                     self.name,
-                    PosLogger(&self.pos),
-                    PosLogger(&pos),
+                    OptionLogger(&self.pos),
+                    OptionLogger(&pos),
                 );
                 pos
             }
@@ -640,8 +657,8 @@ impl Database {
                 log::debug!(
                     "[database] sync: db = {}, prev_pos = {}, pos = {}, all pages have changed",
                     self.name,
-                    PosLogger(&self.pos),
-                    PosLogger(&pos)
+                    OptionLogger(&self.pos),
+                    OptionLogger(&pos)
                 );
                 match self.pager.clear(&self.name) {
                     Err(err) => {
@@ -663,8 +680,8 @@ impl Database {
                 log::debug!(
                     "[database] sync: db = {}, prev_pos = {}, pos = {}, pages = {}",
                     self.name,
-                    PosLogger(&self.pos),
-                    PosLogger(&pos),
+                    OptionLogger(&self.pos),
+                    OptionLogger(&pos),
                     IterLogger(&pgnos)
                 );
 
@@ -703,7 +720,7 @@ impl Database {
         self.sync(true)?;
 
         // Make sure we have up-to-date view of the DB header
-        let mut header = [0; sqlite::HEADER_SIZE as usize];
+        let mut header = [0; sqlite::HEADER_SIZE];
         self.read_at(&mut header, 0, false)?;
 
         let dbsize = self
@@ -715,6 +732,12 @@ impl Database {
                 "database size unknown",
             ))?;
 
+        log::info!(
+            "[database] caching, db = {}, pos = {}, size = {}",
+            self.name,
+            OptionLogger(&self.pos),
+            dbsize
+        );
         let mut pgnos = Vec::with_capacity(MAX_MAX_PREFETCH_PAGES);
         for pgno in 1..=dbsize.into_inner() {
             let pgno = ltx::PageNum::new(pgno).unwrap();

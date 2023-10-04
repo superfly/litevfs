@@ -1,4 +1,4 @@
-use crate::{lfsc, IterLogger, PosLogger, LITEVFS_IOERR_POS_MISMATCH};
+use crate::{lfsc, IterLogger, OptionLogger, LITEVFS_IOERR_POS_MISMATCH};
 use bytesize::ByteSize;
 use caches::{Cache, SegmentedCache};
 use litetx::{self as ltx, PageChecksum};
@@ -78,7 +78,7 @@ impl Pager {
         log::debug!(
             "[pager] get_page: db = {}, pos = {}, pgno = {}, prefetch = {}",
             db,
-            PosLogger(&pos),
+            OptionLogger(&pos),
             pgno,
             IterLogger(if let Some(pgnos) = prefetch {
                 pgnos
@@ -104,7 +104,7 @@ impl Pager {
                 log::error!(
                     "[pager] get_page: db = {}, pos = {}, pgno = {}, prefetch = {}: {:?}",
                     db,
-                    PosLogger(&pos),
+                    OptionLogger(&pos),
                     pgno,
                     IterLogger(if let Some(pgnos) = prefetch {
                         pgnos
@@ -134,7 +134,7 @@ impl Pager {
         log::debug!(
             "[pager] get_page_slice: db = {}, pos = {}, pgno = {}, len = {}, offset = {}, local_only = {}, prefetch = {}",
             db,
-            PosLogger(&pos),
+            OptionLogger(&pos),
             pgno,
             buf.len(),
             offset,
@@ -167,7 +167,7 @@ impl Pager {
                 log::error!(
                     "[pager] get_page_slice: db = {}, pos = {}, pgno = {}, len = {}, offset = {}, local_only = {}, prefetch = {}: {:?}",
                     db,
-                    PosLogger(&pos),
+                    OptionLogger(&pos),
                     pgno,
                     buf.len(),
                     offset,
@@ -242,8 +242,6 @@ impl Pager {
 
     /// Checks if the page is cached locally
     pub(crate) fn has_page(&self, db: &str, pgno: ltx::PageNum) -> io::Result<bool> {
-        log::debug!("[pager] has_page: db = {}, pgno = {}", db, pgno);
-
         match self.has_page_inner(db, pgno) {
             Err(err) => {
                 log::error!("[pager] has_page: db = {} pgno = {}: {:?}", db, pgno, err);
