@@ -2,7 +2,7 @@ use std::{collections::BTreeSet, ops};
 
 use litetx as ltx;
 
-pub(crate) const HEADER_SIZE: u64 = 100;
+pub(crate) const HEADER_SIZE: usize = 100;
 pub(crate) const WRITE_VERSION_OFFSET: usize = 18;
 pub(crate) const READ_VERSION_OFFSET: usize = 19;
 pub(crate) const COMMIT_RANGE: ops::Range<usize> = 28..32;
@@ -12,7 +12,7 @@ pub(crate) fn prefetch_candidates(
     pgno: ltx::PageNum,
 ) -> Option<BTreeSet<ltx::PageNum>> {
     let bh = if pgno == ltx::PageNum::ONE {
-        &data[HEADER_SIZE as usize..]
+        &data[HEADER_SIZE..]
     } else {
         data
     };

@@ -1,4 +1,4 @@
-use crate::{http, IterLogger, PosLogger};
+use crate::{http, IterLogger, OptionLogger};
 use litetx as ltx;
 use std::{collections::HashMap, env, fmt, io, sync};
 
@@ -154,7 +154,7 @@ impl<'a> fmt::Display for LeaseOp<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::result::Result<(), fmt::Error> {
         match self {
             LeaseOp::Acquire(dur) => write!(f, "acquire({}ms)", dur.as_millis()),
-            LeaseOp::Refresh(id, dur) => write!(f, "refresh({}, {}ms", id, dur.as_millis()),
+            LeaseOp::Refresh(id, dur) => write!(f, "refresh({}, {}ms)", id, dur.as_millis()),
         }
     }
 }
@@ -172,6 +172,22 @@ impl fmt::Display for Lease {
     }
 }
 
+struct PositionsLogger<'a>(&'a HashMap<String, Option<ltx::Pos>>);
+
+impl<'a> fmt::Display for PositionsLogger<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[")?;
+
+        for (i, (db, pos)) in self.0.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{}={}", db, OptionLogger(pos))?;
+        }
+
+        write!(f, "]")
+    }
+}
 impl Client {
     const CLUSTER_ID_LEN: usize = 20;
     const CLUSTER_ID_PREFIX: &'static str = "LFSC";
@@ -234,6 +250,155 @@ impl Client {
     pub(crate) fn pos_map(&self) -> Result<HashMap<String, Option<ltx::Pos>>> {
         log::debug!("[lfsc] pos_map");
 
+        match self.pos_map_inner() {
+            Err(err) => {
+                log::error!("[lfsc] pos_map: {}", err);
+                Err(err)
+            }
+            x => x,
+        }
+    }
+
+    pub(crate) fn write_tx(
+        &self,
+        db: &str,
+        ltx: impl io::Read,
+        ltx_len: u64,
+        lease: &str,
+    ) -> Result<()> {
+        log::debug!(
+            "[lfsc] write_tx: db = {}, lease = {}, ltx_len = {}",
+            db,
+            lease,
+            ltx_len
+        );
+
+        match self.write_tx_inner(db, ltx, ltx_len, lease) {
+            Err(err) => {
+                log::error!(
+                    "[lfsc] write_tx: db = {}, lease = {}, ltx_len = {}: {}",
+                    db,
+                    lease,
+                    ltx_len,
+                    err
+                );
+                Err(err)
+            }
+            x => x,
+        }
+    }
+
+    pub(crate) fn get_pages(
+        &self,
+        db: &str,
+        pos: ltx::Pos,
+        pgnos: &[ltx::PageNum],
+    ) -> Result<Vec<Page>> {
+        log::debug!(
+            "[lfsc] get_pages: db = {}, pos = {}, pgnos = {}",
+            db,
+            pos,
+            IterLogger(pgnos)
+        );
+
+        match self.get_pages_inner(db, pos, pgnos) {
+            Err(err) => {
+                log::error!(
+                    "[lfsc] get_pages: db = {}, pos = {}, pgnos = {}: {}",
+                    db,
+                    pos,
+                    IterLogger(pgnos),
+                    err
+                );
+                Err(err)
+            }
+            x => x,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn info(&self) -> Result<Info> {
+        log::debug!("[lfsc] info");
+
+        match self.info_inner() {
+            Err(err) => {
+                log::error!("[lfsc] info: {}", err);
+                Err(err)
+            }
+            x => x,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn sync_db(&self, db: &str, pos: Option<ltx::Pos>) -> Result<Changes> {
+        log::debug!("[lfsc] sync: db = {}, pos = {}", db, OptionLogger(&pos));
+
+        match self.sync_db_inner(db, pos) {
+            Err(err) => {
+                log::error!(
+                    "[lfsc] sync_db: db = {}, pos = {}: {}",
+                    db,
+                    OptionLogger(&pos),
+                    err
+                );
+                Err(err)
+            }
+            x => x,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn acquire_lease(&self, db: &str, op: LeaseOp) -> Result<Lease> {
+        log::debug!("[lfsc] acquire_lease: db = {}, op = {}", db, op);
+
+        match self.acquire_lease_inner(db, &op) {
+            Err(err) => {
+                log::error!("[lfsc] acquire_lease: db = {}, op = {}: {}", db, op, err);
+                Err(err)
+            }
+            x => x,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn release_lease(&self, db: &str, lease: Lease) -> Result<()> {
+        log::debug!("[lfsc] release_lease: db = {}, lease = {}", db, lease.id);
+
+        match self.release_lease_inner(db, &lease) {
+            Err(err) => {
+                log::error!(
+                    "[lfsc] release_lease: db = {}, lease = {}: {}",
+                    db,
+                    lease.id,
+                    err
+                );
+                Err(err)
+            }
+            x => x,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn sync(
+        &self,
+        positions: &HashMap<String, Option<ltx::Pos>>,
+    ) -> Result<HashMap<String, Changes>> {
+        log::debug!("[lfsc] sync: positions = {}", PositionsLogger(positions));
+
+        match self.sync_inner(positions) {
+            Err(err) => {
+                log::error!(
+                    "[lfsc] sync: positions = {}: {}",
+                    PositionsLogger(positions),
+                    err
+                );
+                Err(err)
+            }
+            x => x,
+        }
+    }
+
+    fn pos_map_inner(&self) -> Result<HashMap<String, Option<ltx::Pos>>> {
         let mut u = self.host.clone();
         u.set_path("/pos");
 
@@ -248,15 +413,13 @@ impl Client {
             .collect())
     }
 
-    pub(crate) fn write_tx(
+    fn write_tx_inner(
         &self,
         db: &str,
         ltx: impl io::Read,
         ltx_len: u64,
         lease: &str,
     ) -> Result<()> {
-        log::debug!("[lfsc] write_tx: db = {}", db);
-
         let mut u = self.host.clone();
         u.set_path("/db/tx");
         u.query_pairs_mut().append_pair("db", db);
@@ -273,19 +436,12 @@ impl Client {
         Ok(())
     }
 
-    pub(crate) fn get_pages(
+    fn get_pages_inner(
         &self,
         db: &str,
         pos: ltx::Pos,
         pgnos: &[ltx::PageNum],
     ) -> Result<Vec<Page>> {
-        log::debug!(
-            "[lfsc] get_pages: db = {}, pos = {}, pgnos = {}",
-            db,
-            pos,
-            IterLogger(pgnos)
-        );
-
         #[derive(serde::Deserialize)]
         struct GetPageResponse {
             pages: Vec<Page>,
@@ -309,18 +465,14 @@ impl Client {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn info(&self) -> Result<Info> {
-        log::debug!("[lfsc] info");
-
+    fn info_inner(&self) -> Result<Info> {
         let mut u = self.host.clone();
         u.set_path("/info");
 
         self.call("GET", u)
     }
 
-    pub(crate) fn sync_db(&self, db: &str, pos: Option<ltx::Pos>) -> Result<Changes> {
-        log::debug!("[lfsc] sync: db = {}, pos = {}", db, PosLogger(&pos));
-
+    fn sync_db_inner(&self, db: &str, pos: Option<ltx::Pos>) -> Result<Changes> {
         let mut u = self.host.clone();
         u.set_path("/db/sync");
         u.query_pairs_mut().append_pair("db", db);
@@ -332,9 +484,7 @@ impl Client {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn acquire_lease(&self, db: &str, op: LeaseOp) -> Result<Lease> {
-        log::debug!("[lfsc] acquire_lease: db = {}, op = {}", db, op);
-
+    fn acquire_lease_inner(&self, db: &str, op: &LeaseOp) -> Result<Lease> {
         let mut u = self.host.clone();
         u.set_path("/lease");
         u.query_pairs_mut().append_pair("db", db);
@@ -353,9 +503,7 @@ impl Client {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn release_lease(&self, db: &str, lease: Lease) -> Result<()> {
-        log::debug!("[lfsc] release_lease: db = {}, lease = {}", db, lease.id);
-
+    fn release_lease_inner(&self, db: &str, lease: &Lease) -> Result<()> {
         let mut u = self.host.clone();
         u.set_path("/lease");
         u.query_pairs_mut()
@@ -371,12 +519,10 @@ impl Client {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn sync(
+    fn sync_inner(
         &self,
         positions: &HashMap<String, Option<ltx::Pos>>,
     ) -> Result<HashMap<String, Changes>> {
-        log::debug!("[lfsc] sync: positions = {:?}", positions);
-
         let mut u = self.host.clone();
         u.set_path("/sync");
 
