@@ -362,7 +362,6 @@ impl Client {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) fn sync(
         &self,
         positions: &HashMap<String, Option<ltx::Pos>>,
@@ -502,7 +501,6 @@ impl Client {
         Ok(())
     }
 
-    #[allow(dead_code)]
     fn sync_inner(
         &self,
         positions: &HashMap<String, Option<ltx::Pos>>,

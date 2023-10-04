@@ -473,7 +473,7 @@ impl LiteDatabaseHandle {
                 self.release_exclusive();
                 return Err(err);
             }
-            if let Err(err) = db.sync(true) {
+            if let Err(err) = db.sync(true, false) {
                 _ = db.release_lease();
                 drop(db);
                 self.release_exclusive();
@@ -552,7 +552,7 @@ impl DatabaseHandle for LiteDatabaseHandle {
             // There are no readers, try and sync. If we fail, let SQLite take the read lock, we may still be
             // able to read the data. The important part here is that `sync()` doesn't fetch any data, so
             // the cache stays consistent.
-            if let Err(err) = self.database.write().unwrap().sync(false) {
+            if let Err(err) = self.database.write().unwrap().sync(false, false) {
                 log::warn!("[database] sync: db = {}: {}", self.name, err);
             }
 
