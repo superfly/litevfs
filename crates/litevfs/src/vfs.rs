@@ -542,7 +542,7 @@ impl DatabaseHandle for LiteDatabaseHandle {
             // So wait for them to finish first, otherwise they might see inconsistent state.
             if let Err(err) = self.acquire_exclusive() {
                 log::warn!(
-                    "[database] sync: db = {}, timeout waiting for active connections, skipping sync: {:?}",
+                    "[database] sync: db = {}, timeout waiting for active connections, skipping sync: {}",
                     self.name, err
                 );
 
@@ -553,7 +553,7 @@ impl DatabaseHandle for LiteDatabaseHandle {
             // able to read the data. The important part here is that `sync()` doesn't fetch any data, so
             // the cache stays consistent.
             if let Err(err) = self.database.write().unwrap().sync(false) {
-                log::warn!("[database] sync: db = {}: {:?}", self.name, err);
+                log::warn!("[database] sync: db = {}: {}", self.name, err);
             }
 
             self.release_exclusive();

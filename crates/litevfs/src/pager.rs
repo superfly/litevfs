@@ -102,7 +102,7 @@ impl Pager {
         match r {
             Err(err) => {
                 log::error!(
-                    "[pager] get_page: db = {}, pos = {}, pgno = {}, prefetch = {}: {:?}",
+                    "[pager] get_page: db = {}, pos = {}, pgno = {}, prefetch = {}: {}",
                     db,
                     OptionLogger(&pos),
                     pgno,
@@ -165,7 +165,7 @@ impl Pager {
         match r {
             Err(err) => {
                 log::error!(
-                    "[pager] get_page_slice: db = {}, pos = {}, pgno = {}, len = {}, offset = {}, local_only = {}, prefetch = {}: {:?}",
+                    "[pager] get_page_slice: db = {}, pos = {}, pgno = {}, len = {}, offset = {}, local_only = {}, prefetch = {}: {}",
                     db,
                     OptionLogger(&pos),
                     pgno,
@@ -189,7 +189,7 @@ impl Pager {
         match self.put_page_inner(db, page) {
             Err(err) => {
                 log::error!(
-                    "[pager] put_page: db = {}, pgno = {}: {:?}",
+                    "[pager] put_page: db = {}, pgno = {}: {}",
                     db,
                     page.number(),
                     err,
@@ -207,7 +207,7 @@ impl Pager {
 
         match self.del_page_inner(db, pgno) {
             Err(err) => {
-                log::error!("[pager] del_page: db = {}, pgno = {}: {:?}", db, pgno, err);
+                log::error!("[pager] del_page: db = {}, pgno = {}: {}", db, pgno, err);
                 Err(err)
             }
             x => x,
@@ -220,7 +220,7 @@ impl Pager {
 
         match self.truncate_inner(db, pgno) {
             Err(err) => {
-                log::error!("[pager] truncate: db = {}, pgno = {}: {:?}", db, pgno, err);
+                log::error!("[pager] truncate: db = {}, pgno = {}: {}", db, pgno, err);
                 Err(err)
             }
             x => x,
@@ -233,7 +233,7 @@ impl Pager {
 
         match self.clear_inner(db) {
             Err(err) => {
-                log::error!("[pager] clear: db = {}: {:?}", db, err);
+                log::error!("[pager] clear: db = {}: {}", db, err);
                 Err(err)
             }
             x => x,
@@ -244,7 +244,7 @@ impl Pager {
     pub(crate) fn has_page(&self, db: &str, pgno: ltx::PageNum) -> io::Result<bool> {
         match self.has_page_inner(db, pgno) {
             Err(err) => {
-                log::error!("[pager] has_page: db = {} pgno = {}: {:?}", db, pgno, err);
+                log::error!("[pager] has_page: db = {} pgno = {}: {}", db, pgno, err);
                 Err(err)
             }
             x => x,

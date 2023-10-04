@@ -28,7 +28,7 @@ pub(crate) use emscripten::Syncer;
 
 #[cfg(not(target_os = "emscripten"))]
 mod native {
-    use crate::lfsc;
+    use crate::{lfsc, PositionsLogger};
     use litetx as ltx;
     use std::{
         collections::HashMap,
@@ -248,7 +248,10 @@ mod native {
                     .collect()
             };
 
-            log::debug!("[syncer] sync: positions = {:?}", old_positions);
+            log::debug!(
+                "[syncer] sync: positions = {}",
+                PositionsLogger(&old_positions)
+            );
             let mut changes = self.client.sync(&old_positions)?;
 
             let interner = self.interner.lock().unwrap();
@@ -328,7 +331,7 @@ mod native {
                     .collect::<Vec<_>>();
                 if !dbs.is_empty() {
                     if let Err(err) = self.sync(&dbs) {
-                        log::warn!("[syncer] run: sync failed: {:?}", err);
+                        log::warn!("[syncer] run: sync failed: {}", err);
                     }
                 }
             }
