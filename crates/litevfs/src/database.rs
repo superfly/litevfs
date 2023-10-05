@@ -54,6 +54,7 @@ impl DatabaseManager {
         let db = if let Some(db) = self.get_database_local_in_mem(dbname, access)? {
             db
         } else if let Some(db) = self.get_database_local_on_disk(dbname, access)? {
+            self.databases.insert(dbname.into(), Arc::clone(&db));
             db
         } else if let Some(db) = self.get_database_remote(dbname, access)? {
             self.databases.insert(dbname.into(), Arc::clone(&db));
@@ -256,7 +257,7 @@ impl Database {
             journal_path,
             page_size,
             committed_db_size: Mutex::new(commit),
-            current_db_size: commit,
+            current_db_size: None,
             pos,
             dirty_pages: BTreeMap::new(),
             prefetch_pages: Mutex::new(BTreeSet::new()),
@@ -354,6 +355,8 @@ impl Database {
 
     pub(crate) fn size(&self) -> io::Result<u64> {
         let commit = if let Some(commit) = self.current_db_size {
+            commit
+        } else if let Some(commit) = *self.committed_db_size.lock().unwrap() {
             commit
         } else {
             return Ok(0);
@@ -539,6 +542,7 @@ impl Database {
         };
 
         *self.committed_db_size.lock().unwrap() = self.current_db_size;
+        self.current_db_size.take();
         self.dirty_pages.clear();
 
         self.pos = Some(pos);
