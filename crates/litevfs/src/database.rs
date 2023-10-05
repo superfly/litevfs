@@ -535,6 +535,7 @@ impl Database {
                 for &page_num in self.dirty_pages.keys() {
                     self.pager.del_page(&self.name, page_num)?;
                 }
+                self.current_db_size.take();
                 self.dirty_pages.clear();
 
                 return Err(err);
