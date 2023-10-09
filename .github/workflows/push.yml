@@ -1,5 +1,8 @@
 name: "Push"
 on:
+  release:
+    types:
+      - created
   push:
     branches:
       - main
@@ -72,6 +75,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - id: release
+        uses: bruceadams/get-release@v1.3.2
+        if: github.event_name == 'release'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -107,6 +115,17 @@ jobs:
           path: target/${{ matrix.target }}/release/${{ matrix.soname }}
           if-no-files-found: error
 
+      - name: Upload release
+        uses: actions/upload-release-asset@v1.0.2
+        if: github.event_name == 'release'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          upload_url: ${{ steps.release.outputs.upload_url }}
+          asset_path: target/${{ matrix.target }}/release/litevfs-${{ env.VERSION }}-${{ matrix.target }}.tar.gz
+          asset_name: litevfs-${{ env.VERSION }}-${{ matrix.target }}.tar.gz
+          asset_content_type: application/gzip
+
   build-wasm:
     name: "Build WASM"
     runs-on: "ubuntu-latest"
@@ -116,6 +135,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - id: release
+        uses: bruceadams/get-release@v1.3.2
+        if: github.event_name == 'release'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-emscripten
@@ -145,6 +169,17 @@ jobs:
           name: sqlite3-wasm-${{ env.VERSION }}
           path: target/sqlite3-wasm
           if-no-files-found: error
+
+      - name: Upload release
+        uses: actions/upload-release-asset@v1.0.2
+        if: github.event_name == 'release'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          upload_url: ${{ steps.release.outputs.upload_url }}
+          asset_path: target/sqlite3-wasm-${{ env.VERSION }}.tar.gz
+          asset_name: sqlite3-wasm-${{ env.VERSION }}.tar.gz
+          asset_content_type: application/gzip
 
   build-npm:
     name: "Build NPM packages"
@@ -179,3 +214,13 @@ jobs:
           name: npm-packages-${{ env.VERSION }}
           path: target/npm
           if-no-files-found: error
+
+      - name: Publish NPM packages
+        if: github.event_name == 'release'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          cd target/npm
+          for p in litevfs-*.tgz; do
+            npm publish $p
+          done
