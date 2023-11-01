@@ -114,10 +114,11 @@ checksum = "a3e368af43e418a04d52505cf3dbc23dda4e3407ae2fa99fd0e4f308ce546acc"
 
 [[package]]
 name = "caches"
-version = "0.2.4"
+version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c642c6090017af7cca02dc622f7abdd1d7d1b8a908078e3e31ed05b5a5bacc4"
+checksum = "72b635ae087d4472c6be48ea5c4965703bc24ed2d7669e88b0b085ca39b1ff27"
 dependencies = [
+ "getrandom",
  "rand",
 ]
 
@@ -376,8 +377,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be4136b2a15dd319360be1c07d9933517ccf0be8f16bf62a3bee4f0d618df427"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "wasi",
+ "wasm-bindgen",
 ]
 
 [[package]]
