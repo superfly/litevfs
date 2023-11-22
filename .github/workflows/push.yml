@@ -144,7 +144,7 @@ jobs:
         with:
           targets: wasm32-unknown-emscripten
           components: clippy, rustfmt
-      - uses: mymindstorm/setup-emsdk@v12
+      - uses: mymindstorm/setup-emsdk@v13
         with:
           version: ${{ env.EM_VERSION }}
           actions-cache-folder: ${{env.EM_CACHE_FOLDER}}
