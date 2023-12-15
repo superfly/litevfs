@@ -196,7 +196,7 @@ jobs:
         with:
           node-version: 18
           registry-url: 'https://registry.npmjs.org'
-      - uses: actions/download-artifact@v3
+      - uses: actions/download-artifact@v4
         with:
           path: /tmp/litevfs
       - name: "Build NPM packages"
