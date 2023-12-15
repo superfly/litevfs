@@ -109,7 +109,7 @@ jobs:
           tar -czvf litevfs-${{ env.VERSION }}-${{ matrix.target }}.tar.gz ${{ matrix.soname }}
 
       - name: Upload binary artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: litevfs-${{ env.VERSION }}-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/${{ matrix.soname }}
@@ -164,7 +164,7 @@ jobs:
           tar -czvf sqlite3-wasm-${{ env.VERSION }}.tar.gz sqlite3-wasm
 
       - name: Upload binary artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: sqlite3-wasm-${{ env.VERSION }}
           path: target/sqlite3-wasm
@@ -210,7 +210,7 @@ jobs:
           cargo xtask build-npm-binary --lib /tmp/litevfs/litevfs-${{ env.VERSION }}-aarch64-apple-darwin/liblitevfs.dylib --cpu arm64 --os darwin
           cargo xtask build-npm-binary --lib /tmp/litevfs/litevfs-${{ env.VERSION }}-x86_64-pc-windows-msvc/litevfs.dll --cpu x64 --os windows
       - name: Upload binary artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: npm-packages-${{ env.VERSION }}
           path: target/npm
