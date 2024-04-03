@@ -98,7 +98,7 @@ impl DatabaseManager {
             ));
         }
 
-        Ok(db.map(Arc::clone))
+        Ok(db.cloned())
     }
 
     fn get_database_local_on_disk(

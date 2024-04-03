@@ -439,7 +439,7 @@ impl Pager {
     fn truncate_inner(&self, db: &str, pgno: ltx::PageNum) -> io::Result<()> {
         let fname: ffi::OsString = PathBuf::from(pgno).into();
 
-        for entry in fs::read_dir(&self.pages_path(db))? {
+        for entry in fs::read_dir(self.pages_path(db))? {
             let entry = entry?;
             if !entry.file_type()?.is_file() || entry.file_name() <= fname {
                 continue;
@@ -457,7 +457,7 @@ impl Pager {
     fn clear_inner(&self, db: &str) -> io::Result<Vec<ltx::PageNum>> {
         let mut pgnos = Vec::new();
 
-        for entry in fs::read_dir(&self.pages_path(db))? {
+        for entry in fs::read_dir(self.pages_path(db))? {
             let entry = entry?;
             if !entry.file_type()?.is_file() {
                 continue;
