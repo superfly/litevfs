@@ -851,7 +851,7 @@ mod vfs {
         log::trace!("current_time_int64");
 
         const UNIX_EPOCH: i64 = 24405875 * 8640000;
-        let now = time::OffsetDateTime::now_utc().unix_timestamp() + UNIX_EPOCH;
+        let now = time::OffsetDateTime::now_utc().unix_timestamp() * 1000 + UNIX_EPOCH;
 
         *p = now;
         ffi::SQLITE_OK
