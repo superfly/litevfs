@@ -18,10 +18,11 @@
   }:
     flake-utils.lib.eachDefaultSystem (system: let
       pkgs = import nixpkgs {inherit system;};
-      toolchain = fenix.packages.${system}.fromToolchainFile {
-        file = ./rust-toolchain.toml;
-        sha256 = "sha256-3St/9/UKo/6lz2Kfq2VmlzHyufduALpiIKaaKX4Pq0g=";
-      };
+      toolchain = with fenix.packages.${system};
+        combine [
+          stable.toolchain
+          targets.wasm32-unknown-emscripten.stable.rust-std
+        ];
     in {
       devShells.default = pkgs.mkShell {
         buildInputs = [
