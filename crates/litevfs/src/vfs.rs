@@ -705,6 +705,7 @@ impl LiteJournalHandle {
                 .read(true)
                 .write(true)
                 .create(true)
+                .truncate(false)
                 .open(&db.journal_path)?;
             let name = db.name.clone();
             (journal, name)
